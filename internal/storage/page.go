@@ -54,24 +54,20 @@ type Page struct {
 	data []byte // Raw 4096 byte slice
 }
 
-func NewPage(isPageTypeLeaf bool) *Page {
+func NewPage(mode uint8) *Page {
 	p := &Page{
 		data: make([]byte, PageSize),
 	}
-	p.Init(isPageTypeLeaf)
+	p.Init(mode)
 	return p
 }
 
-func (p *Page) Init(isPageTypeLeaf bool) {
+func (p *Page) Init(mode uint8) {
 	binary.LittleEndian.PutUint32(p.data[magicOffset:], Magic)
 	p.setFreeSpaceOffset(uint16(PageSize))
 	p.setSlotCount(0)
 	p.SetLSN(0)
-	if isPageTypeLeaf {
-		p.SetPageType(PageTypeLeaf)
-	} else {
-		p.SetPageType(PageTypeInternal)
-	}
+	p.SetPageType(mode)
 }
 
 // --- Header Accessors ---

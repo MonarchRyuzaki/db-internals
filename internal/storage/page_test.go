@@ -6,7 +6,7 @@ import (
 )
 
 func TestPage_BasicInsertGet(t *testing.T) {
-	p := NewPage(true)
+	p := NewPage(PageTypeLeaf)
 	p.SetPageID(1)
 	p.SetPageType(PageTypeLeaf)
 	p.SetLSN(100)
@@ -64,7 +64,7 @@ func TestPage_BasicInsertGet(t *testing.T) {
 }
 
 func TestPage_Integrity(t *testing.T) {
-	p := NewPage(true)
+	p := NewPage(PageTypeLeaf)
 	c := NewKVCell(0, []byte("key"), []byte("value"))
 	p.Insert(c.Serialize())
 
@@ -82,7 +82,7 @@ func TestPage_Integrity(t *testing.T) {
 }
 
 func TestPage_Full(t *testing.T) {
-	p := NewPage(true)
+	p := NewPage(PageTypeLeaf)
 	// Large cell to fill page quickly
 	largeKey := make([]byte, 2000)
 	largeVal := make([]byte, 2000)
