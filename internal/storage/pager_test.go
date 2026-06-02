@@ -2,18 +2,17 @@ package storage
 
 import (
 	"bytes"
-	"os"
 	"testing"
 )
 
 func TestPager_WriteAndRead(t *testing.T) {
-	// Create a temporary file for testing
-	f, err := os.CreateTemp("", "test_pager_*.db")
+	dir := t.TempDir()
+	
+	pager, err := NewPager(dir, "test.db")
 	if err != nil {
-		t.Fatalf("failed to create temp file: %v", err)
+		t.Fatalf("failed to create pager: %v", err)
 	}
-	defer os.Remove(f.Name())
-	defer f.Close()
+	defer pager.Close()
 
 	// Create and initialize a page
 	p1 := NewPage(PageTypeLeaf)
@@ -28,14 +27,14 @@ func TestPager_WriteAndRead(t *testing.T) {
 	}
 
 	// Write Page 0
-	err = WritePage(f, 0, p1)
+	err = pager.WritePage(0, p1)
 	if err != nil {
 		t.Fatalf("failed to write page: %v", err)
 	}
 
 	// Read it back into a new page
 	p2 := NewPage(0)
-	err = ReadPage(f, 0, p2)
+	err = pager.ReadPage(0, p2)
 	if err != nil {
 		t.Fatalf("failed to read page: %v", err)
 	}
@@ -55,23 +54,24 @@ func TestPager_WriteAndRead(t *testing.T) {
 }
 
 func TestPager_AppendPage(t *testing.T) {
-	f, err := os.CreateTemp("", "test_pager_append_*.db")
+	dir := t.TempDir()
+
+	pager, err := NewPager(dir, "test_append.db")
 	if err != nil {
-		t.Fatalf("failed to create temp file: %v", err)
+		t.Fatalf("failed to create pager: %v", err)
 	}
-	defer os.Remove(f.Name())
-	defer f.Close()
+	defer pager.Close()
 
 	// Write to Page ID 2 (which should effectively make the file 3 pages long)
 	p := NewPage(PageTypeInternal)
 	p.SetPageID(2)
 
-	err = WritePage(f, 2, p)
+	err = pager.WritePage(2, p)
 	if err != nil {
 		t.Fatalf("failed to write page: %v", err)
 	}
 
-	stat, _ := f.Stat()
+	stat, _ := pager.file.Stat()
 	expectedSize := int64(3 * PageSize)
 	if stat.Size() != expectedSize {
 		t.Errorf("expected file size %d, got %d", expectedSize, stat.Size())
