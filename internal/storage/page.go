@@ -46,6 +46,10 @@ const (
 )
 
 const (
+	SlotSize = 4 // 2 bytes for cell offset, 2 bytes for cell size.
+)
+
+const (
 	PageTypeLeaf     uint8 = 1
 	PageTypeInternal uint8 = 2
 )
@@ -141,9 +145,9 @@ func (p *Page) Insert(cellData []byte) (uint16, error) {
 	freeOffset := p.getFreeSpaceOffset()
 
 	cellSize := uint16(len(cellData))
-	neededSpace := cellSize + 2
+	neededSpace := cellSize + SlotSize
 
-	directoryEnd := HeaderSize + (slotCount * 2)
+	directoryEnd := HeaderSize + (slotCount * SlotSize)
 
 	if uint16(directoryEnd)+neededSpace > freeOffset {
 		return 0, errors.New("page full")
@@ -153,8 +157,9 @@ func (p *Page) Insert(cellData []byte) (uint16, error) {
 	copy(p.data[newFreeOffset:freeOffset], cellData)
 	p.setFreeSpaceOffset(newFreeOffset)
 
-	slotEntryOffset := HeaderSize + (slotCount * 2)
+	slotEntryOffset := HeaderSize + (slotCount * SlotSize)
 	binary.LittleEndian.PutUint16(p.data[slotEntryOffset:slotEntryOffset+2], newFreeOffset)
+	binary.LittleEndian.PutUint16(p.data[slotEntryOffset+2:slotEntryOffset+4], cellSize)
 
 	newSlotID := slotCount
 	p.setSlotCount(slotCount + 1)
@@ -168,8 +173,9 @@ func (p *Page) Get(slotID uint16) ([]byte, error) {
 		return nil, errors.New("invalid slot id")
 	}
 
-	slotEntryOffset := HeaderSize + (slotID * 2)
+	slotEntryOffset := HeaderSize + (slotID * SlotSize)
 	cellOffset := binary.LittleEndian.Uint16(p.data[slotEntryOffset : slotEntryOffset+2])
+	cellSize := binary.LittleEndian.Uint16(p.data[slotEntryOffset+2 : slotEntryOffset+4])
 
-	return p.data[cellOffset:], nil
+	return p.data[cellOffset : cellOffset+cellSize], nil
 }
