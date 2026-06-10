@@ -9,8 +9,9 @@ import (
 type Frame struct {
 	Page          *Page  // Pointer to the actual 4KB page data
 	IsDirty       bool   // True if the page has been modified since being read from disk
-	PinCount      uint32 // Number of active threads using this page (uint32 is safer than uint8 for concurrency)
+	PinCount      uint32 // Number of active threads using this page
 	ReferenceBits uint16 // Used for page replacement policy
+	Latch         sync.RWMutex // Page-level lock
 }
 
 // BufferManager handles the caching of disk pages in memory.
@@ -42,15 +43,35 @@ func NewBufferManager(dir, filename string, maxSize int) (*BufferManager, error)
 	}, nil
 }
 
-// FetchPage retrieves a page from the buffer pool. If it's not in memory, it reads it from disk.
-func (bm *BufferManager) FetchPage(pageID uint32, fallbackPageMode uint8) (*Page, error) {
+// FetchPageForRead retrieves a page and acquires a read (shared) latch.
+func (bm *BufferManager) FetchPageForRead(pageID uint32, fallbackPageMode uint8) (*Page, error) {
+	frame, err := bm.getFrame(pageID, fallbackPageMode)
+	if err != nil {
+		return nil, err
+	}
+	frame.Latch.RLock()
+	return frame.Page, nil
+}
+
+// FetchPageForWrite retrieves a page and acquires a write (exclusive) latch.
+func (bm *BufferManager) FetchPageForWrite(pageID uint32, fallbackPageMode uint8) (*Page, error) {
+	frame, err := bm.getFrame(pageID, fallbackPageMode)
+	if err != nil {
+		return nil, err
+	}
+	frame.Latch.Lock()
+	return frame.Page, nil
+}
+
+// getFrame handles the buffer pool logic (pinning, evicting, reading from disk).
+func (bm *BufferManager) getFrame(pageID uint32, fallbackPageMode uint8) (*Frame, error) {
 	bm.mu.Lock()
 	defer bm.mu.Unlock()
 
 	if frame, exists := bm.pageTable[pageID]; exists {
 		frame.PinCount++
 		// (Later: update ReferenceBits here for eviction policy)
-		return frame.Page, nil
+		return frame, nil
 	}
 
 	if len(bm.pageTable) >= bm.maxSize {
@@ -71,20 +92,21 @@ func (bm *BufferManager) FetchPage(pageID uint32, fallbackPageMode uint8) (*Page
 	}
 	bm.pageTable[pageID] = frame
 
-	return p, nil
+	return frame, nil
 }
 
 // UnpinPage tells the buffer manager that a thread is done using this page.
-func (bm *BufferManager) UnpinPage(pageID uint32, isDirty bool) error {
+func (bm *BufferManager) UnpinPage(pageID uint32, isDirty bool, isWrite bool) error {
 	bm.mu.Lock()
-	defer bm.mu.Unlock()
 
 	frame, exists := bm.pageTable[pageID]
 	if !exists {
+		bm.mu.Unlock()
 		return fmt.Errorf("page %d is not in buffer pool", pageID)
 	}
 
 	if frame.PinCount == 0 {
+		bm.mu.Unlock()
 		return fmt.Errorf("page %d pin count is already 0", pageID)
 	}
 
@@ -92,6 +114,14 @@ func (bm *BufferManager) UnpinPage(pageID uint32, isDirty bool) error {
 
 	if isDirty {
 		frame.IsDirty = true
+	}
+	
+	bm.mu.Unlock()
+
+	if isWrite {
+		frame.Latch.Unlock()
+	} else {
+		frame.Latch.RUnlock()
 	}
 
 	return nil

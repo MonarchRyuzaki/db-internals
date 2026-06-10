@@ -1,0 +1,119 @@
+package storage
+
+import (
+	"encoding/binary"
+	"fmt"
+	"time"
+)
+
+// StartVacuumRoutine launches a background goroutine that runs the vacuum process periodically.
+func (tree *BTree) StartVacuumRoutine(interval time.Duration) {
+	go func() {
+		for {
+			time.Sleep(interval)
+			fmt.Println("[Vacuum] Starting background cleanup...")
+			err := tree.Vacuum()
+			if err != nil {
+				fmt.Printf("[Vacuum] Error during cleanup: %v\n", err)
+			} else {
+				fmt.Println("[Vacuum] Cleanup finished successfully.")
+			}
+		}
+	}()
+}
+
+// Vacuum triggers a full database sweep to drop tombstones and free associated overflow pages.
+func (tree *BTree) Vacuum() error {
+	// We perform a DFS starting to visit every single leaf node.
+	return tree.vacuumNode(tree.rootPageID)
+}
+
+func (tree *BTree) vacuumNode(pageID uint32) error {
+	// Fetch for READ first since we don't know if it's a leaf yet
+	page, err := tree.bm.FetchPageForRead(pageID, PageTypeInternal)
+	if err != nil {
+		return err
+	}
+
+	// Leaf Node! Drop the read latch and fetch it for WRITE so we can clean it.
+	if page.GetPageType() == PageTypeLeaf {
+		tree.bm.UnpinPage(pageID, false, false)
+		return tree.vacuumLeaf(pageID)
+	}
+
+	// Internal node. Collect all child pointers.
+	slotCount := page.getSlotCount()
+	var children []uint32
+	for i := uint16(0); i < slotCount; i++ {
+		cellData, _ := page.Get(i)
+		kCell := DeserializeKeyCell(cellData)
+		children = append(children, kCell.ChildPageID)
+	}
+
+	tree.bm.UnpinPage(pageID, false, false)
+
+	for _, childID := range children {
+		if childID != 0 {
+			tree.vacuumNode(childID)
+		}
+	}
+
+	return nil
+}
+
+func (tree *BTree) vacuumLeaf(pageID uint32) error {
+	leaf, err := tree.bm.FetchPageForWrite(pageID, PageTypeLeaf)
+	if err != nil {
+		return err
+	}
+	
+	slotCount := leaf.getSlotCount()
+	var cellsToKeep [][]byte
+	cleanedCount := 0
+
+	for i := uint16(0); i < slotCount; i++ {
+		c, _ := leaf.Get(i)
+		kv := DeserializeKVCell(c)
+
+		if kv.IsDeleted() {
+			cleanedCount++
+			if kv.IsOverflow() {
+				tree.freeOverflowChain(kv.Value)
+			}
+		} else {
+			cCopy := make([]byte, len(c))
+			copy(cCopy, c)
+			cellsToKeep = append(cellsToKeep, cCopy)
+		}
+	}
+
+	if cleanedCount > 0 {
+		leaf.Init(PageTypeLeaf)
+		for _, c := range cellsToKeep {
+			leaf.Insert(c)
+		}
+		// Unpin and mark as dirty (isWrite=true)
+		return tree.bm.UnpinPage(pageID, true, true)
+	}
+
+	return tree.bm.UnpinPage(pageID, false, true)
+}
+
+func (tree *BTree) freeOverflowChain(metadata []byte) {
+	currPageID := binary.LittleEndian.Uint32(metadata[0:4])
+
+	for currPageID != 0 {
+		page, err := tree.bm.FetchPageForRead(currPageID, PageTypeOverflow)
+		if err != nil {
+			break
+		}
+		nextPageID := page.GetNextOverflowPageID()
+		tree.bm.UnpinPage(currPageID, false, false)
+
+		// TODO: Add `currPageID` to the Database Free Page List!
+		// For now, we print it to prove the vacuum is finding the orphan pages.
+		fmt.Printf("[Vacuum] Orphan Overflow Page %d found! Ready to be added to Free List.\n", currPageID)
+
+		currPageID = nextPageID
+	}
+}

@@ -73,19 +73,25 @@ func NewBTree(tableName string, dir string) (*BTree, error) {
 
 // findLeafPage traverses the tree to find the appropriate leaf page for a key.
 // It returns the leaf page (PINNED!) and the path of parent page IDs we took to get there.
-func (tree *BTree) findLeafPage(key []byte) (*Page, []uint32, error) {
+func (tree *BTree) findLeafPage(key []byte, forWrite bool) (*Page, []uint32, error) {
 	var path []uint32
 	currPageID := tree.rootPageID
 
 	for {
 		// Fetch the page (this pins it in memory)
-		page, err := tree.bm.FetchPage(currPageID, PageTypeLeaf)
+		page, err := tree.bm.FetchPageForRead(currPageID, PageTypeLeaf)
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to fetch page %d: %w", currPageID, err)
 		}
 
 		if page.GetPageType() == PageTypeLeaf {
-			// Leaf Node
+			if forWrite {
+				tree.bm.UnpinPage(currPageID, false, false) // Drop read lock
+				page, err = tree.bm.FetchPageForWrite(currPageID, PageTypeLeaf)
+				if err != nil {
+					return nil, nil, fmt.Errorf("failed to fetch page for write %d: %w", currPageID, err)
+				}
+			}
 			return page, path, nil
 		}
 
@@ -117,7 +123,7 @@ func (tree *BTree) findLeafPage(key []byte) (*Page, []uint32, error) {
 		path = append(path, currPageID)
 
 		// Unpin the current internal node since we are done with it
-		tree.bm.UnpinPage(currPageID, false)
+		tree.bm.UnpinPage(currPageID, false, false)
 
 		currPageID = nextChildID
 	}
@@ -125,11 +131,11 @@ func (tree *BTree) findLeafPage(key []byte) (*Page, []uint32, error) {
 
 // Find searches the B+ tree for the given key and returns the associated value.
 func (tree *BTree) Find(key []byte) ([]byte, error) {
-	leaf, _, err := tree.findLeafPage(key)
+	leaf, _, err := tree.findLeafPage(key, false)
 	if err != nil {
 		return nil, err
 	}
-	defer tree.bm.UnpinPage(leaf.GetPageID(), false)
+	defer tree.bm.UnpinPage(leaf.GetPageID(), false, false)
 
 	// Linear search the leaf for the exact key
 	// TODO: Binary Search Later
@@ -165,7 +171,7 @@ func (tree *BTree) Delete(key []byte) error {
 
 // upsertCell handles the actual insertion, updating, or tombstoning of a cell.
 func (tree *BTree) upsertCell(key []byte, value []byte, flag uint8) error {
-	leaf, path, err := tree.findLeafPage(key)
+	leaf, path, err := tree.findLeafPage(key, true)
 	if err != nil {
 		return err
 	}
@@ -214,7 +220,7 @@ func (tree *BTree) upsertCell(key []byte, value []byte, flag uint8) error {
 		if flag == KEY_DELETED_FLAG {
 			// We are trying to delete a key that doesn't exist.
 			// Don't bloat the DB with an unnecessary tombstone.
-			tree.bm.UnpinPage(leaf.GetPageID(), false)
+			tree.bm.UnpinPage(leaf.GetPageID(), false, true)
 			return fmt.Errorf("cannot delete: key not found")
 		}
 
@@ -229,7 +235,7 @@ func (tree *BTree) upsertCell(key []byte, value []byte, flag uint8) error {
 		for _, c := range cells {
 			leaf.Insert(c) // Re-insert all cells
 		}
-		return tree.bm.UnpinPage(leaf.GetPageID(), true)
+		return tree.bm.UnpinPage(leaf.GetPageID(), true, true)
 	}
 
 	// It doesn't fit! The page is full, so we must split the leaf.
@@ -253,7 +259,7 @@ func (tree *BTree) splitLeafCells(leaf *Page, path []uint32, cells [][]byte) err
 	if err != nil {
 		return err
 	}
-	newLeaf, err := tree.bm.FetchPage(newLeafID, PageTypeLeaf)
+	newLeaf, err := tree.bm.FetchPageForWrite(newLeafID, PageTypeLeaf)
 	if err != nil {
 		return err
 	}
@@ -272,8 +278,8 @@ func (tree *BTree) splitLeafCells(leaf *Page, path []uint32, cells [][]byte) err
 	routingCell := NewKeyCell(newLeafID, routingKey).Serialize()
 
 	// 6. Unpin both leaves (they are dirty now)
-	tree.bm.UnpinPage(leaf.GetPageID(), true)
-	tree.bm.UnpinPage(newLeafID, true)
+	tree.bm.UnpinPage(leaf.GetPageID(), true, true)
+	tree.bm.UnpinPage(newLeafID, true, true)
 
 	// 7. Bubble up to parent
 	return tree.insertIntoParent(leaf.GetPageID(), routingCell, path)
@@ -284,7 +290,7 @@ func (tree *BTree) insertIntoParent(leftChildID uint32, routingCell []byte, path
 	if len(path) == 0 {
 		// We split the root! Create a brand new root internal node.
 		newRootID, _ := tree.bm.pager.AllocatePage(PageTypeInternal)
-		newRoot, _ := tree.bm.FetchPage(newRootID, PageTypeInternal)
+		newRoot, _ := tree.bm.FetchPageForWrite(newRootID, PageTypeInternal)
 
 		// The new root needs a left-most child pointer (empty key, representing -infinity)
 		leftPointer := NewKeyCell(leftChildID, nil).Serialize()
@@ -292,14 +298,14 @@ func (tree *BTree) insertIntoParent(leftChildID uint32, routingCell []byte, path
 		newRoot.Insert(routingCell)
 
 		tree.rootPageID = newRootID
-		return tree.bm.UnpinPage(newRootID, true)
+		return tree.bm.UnpinPage(newRootID, true, true)
 	}
 
 	// Pop the parent from the stack
 	parentID := path[len(path)-1]
 	path = path[:len(path)-1]
 
-	parent, err := tree.bm.FetchPage(parentID, PageTypeInternal)
+	parent, err := tree.bm.FetchPageForWrite(parentID, PageTypeInternal)
 	if err != nil {
 		return err
 	}
@@ -307,7 +313,7 @@ func (tree *BTree) insertIntoParent(leftChildID uint32, routingCell []byte, path
 	// Try to insert the routing key
 	_, err = parent.Insert(routingCell)
 	if err == nil {
-		return tree.bm.UnpinPage(parentID, true)
+		return tree.bm.UnpinPage(parentID, true, true)
 	}
 
 	// If the internal node is also full, we must split it!
@@ -315,7 +321,7 @@ func (tree *BTree) insertIntoParent(leftChildID uint32, routingCell []byte, path
 		return tree.splitInternal(parent, path, routingCell)
 	}
 
-	tree.bm.UnpinPage(parentID, false)
+	tree.bm.UnpinPage(parentID, false, true)
 	return err
 }
 
@@ -347,7 +353,7 @@ func (tree *BTree) splitInternal(internalNode *Page, path []uint32, newCell []by
 	internalNode.Init(PageTypeInternal)
 
 	newInternalID, _ := tree.bm.pager.AllocatePage(PageTypeInternal)
-	newInternal, _ := tree.bm.FetchPage(newInternalID, PageTypeInternal)
+	newInternal, _ := tree.bm.FetchPageForWrite(newInternalID, PageTypeInternal)
 
 	mid := len(cells) / 2
 
@@ -371,8 +377,8 @@ func (tree *BTree) splitInternal(internalNode *Page, path []uint32, newCell []by
 
 	routingCell := NewKeyCell(newInternalID, routingKey).Serialize()
 
-	tree.bm.UnpinPage(internalNode.GetPageID(), true)
-	tree.bm.UnpinPage(newInternalID, true)
+	tree.bm.UnpinPage(internalNode.GetPageID(), true, true)
+	tree.bm.UnpinPage(newInternalID, true, true)
 
 	return tree.insertIntoParent(internalNode.GetPageID(), routingCell, path)
 }
@@ -391,7 +397,7 @@ func (tree *BTree) createOverflowChain(value []byte) ([]byte, error) {
 			return nil, err
 		}
 
-		page, err := tree.bm.FetchPage(newPageID, PageTypeOverflow)
+		page, err := tree.bm.FetchPageForWrite(newPageID, PageTypeOverflow)
 		if err != nil {
 			return nil, err
 		}
@@ -403,7 +409,7 @@ func (tree *BTree) createOverflowChain(value []byte) ([]byte, error) {
 		// Link the previous page to this new page
 		if prevPage != nil {
 			prevPage.SetNextOverflowPageID(newPageID)
-			tree.bm.UnpinPage(prevPage.GetPageID(), true) // Done with the prev page
+			tree.bm.UnpinPage(prevPage.GetPageID(), true, true) // Done with the prev page
 		}
 
 		chunkSize := len(dataRemaining)
@@ -417,7 +423,7 @@ func (tree *BTree) createOverflowChain(value []byte) ([]byte, error) {
 
 		// If this is the last chunk, we are done with this page
 		if len(dataRemaining) == 0 {
-			tree.bm.UnpinPage(newPageID, true)
+			tree.bm.UnpinPage(newPageID, true, true)
 		} else {
 			// Keep it pinned for the next iteration to link to
 			prevPage = page
@@ -439,7 +445,7 @@ func (tree *BTree) readOverflowChain(metadata []byte) ([]byte, error) {
 	bytesRead := uint32(0)
 
 	for currPageID != 0 {
-		page, err := tree.bm.FetchPage(currPageID, PageTypeOverflow)
+		page, err := tree.bm.FetchPageForRead(currPageID, PageTypeOverflow)
 		if err != nil {
 			return nil, err
 		}
@@ -454,7 +460,7 @@ func (tree *BTree) readOverflowChain(metadata []byte) ([]byte, error) {
 		bytesRead += chunkSize
 
 		nextPageID := page.GetNextOverflowPageID()
-		tree.bm.UnpinPage(currPageID, false)
+		tree.bm.UnpinPage(currPageID, false, false)
 
 		currPageID = nextPageID
 	}

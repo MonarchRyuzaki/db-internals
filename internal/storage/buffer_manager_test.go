@@ -25,7 +25,7 @@ func TestBufferManager_EvictionAndPinning(t *testing.T) {
 
 	// 3. Fetch 3 pages to perfectly fill the buffer pool (IDs 0, 1, 2)
 	for i := uint32(0); i < 3; i++ {
-		p, err := bm.FetchPage(i, PageTypeLeaf)
+		p, err := bm.FetchPageForWrite(i, PageTypeLeaf)
 		if err != nil {
 			t.Fatalf("Failed to fetch page %d: %v", i, err)
 		}
@@ -35,7 +35,7 @@ func TestBufferManager_EvictionAndPinning(t *testing.T) {
 		p.Insert(c.Serialize())
 
 		// Unpin it and mark it dirty!
-		err = bm.UnpinPage(i, true)
+		err = bm.UnpinPage(i, true, true)
 		if err != nil {
 			t.Fatalf("Failed to unpin page %d: %v", i, err)
 		}
@@ -48,13 +48,13 @@ func TestBufferManager_EvictionAndPinning(t *testing.T) {
 
 	// 4. Fetch the 4th page (PageID 3). This MUST trigger an eviction!
 	// Because the map iteration is random, one of 0, 1, or 2 will be kicked out.
-	_, err = bm.FetchPage(3, PageTypeLeaf)
+	_, err = bm.FetchPageForWrite(3, PageTypeLeaf)
 	if err != nil {
 		t.Fatalf("Failed to fetch page 3 (eviction failed): %v", err)
 	}
 	
 	// Unpin page 3 (clean)
-	bm.UnpinPage(3, false)
+	bm.UnpinPage(3, false, true)
 
 	if len(bm.pageTable) != 3 {
 		t.Fatalf("Expected memory to remain at 3 pages after eviction, got %d", len(bm.pageTable))
@@ -64,7 +64,7 @@ func TestBufferManager_EvictionAndPinning(t *testing.T) {
 	// The evicted page will be a cache miss and get read from disk (where its dirty data was safely flushed).
 	// The other two will be instant cache hits.
 	for i := uint32(0); i < 3; i++ {
-		p, err := bm.FetchPage(i, PageTypeLeaf)
+		p, err := bm.FetchPageForWrite(i, PageTypeLeaf)
 		if err != nil {
 			t.Fatalf("Failed to fetch page %d back: %v", i, err)
 		}
@@ -87,7 +87,7 @@ func TestBufferManager_EvictionAndPinning(t *testing.T) {
 	// Right now, pages 0, 1, and 2 are PINNED. 
 	// The pool size is exactly 3. 
 	// If we try to fetch Page 3, it should fail because nothing can be evicted.
-	_, err = bm.FetchPage(3, PageTypeLeaf)
+	_, err = bm.FetchPageForWrite(3, PageTypeLeaf)
 	if err == nil {
 		t.Fatalf("Expected an error when fetching a page with a fully pinned buffer pool!")
 	}
@@ -96,7 +96,7 @@ func TestBufferManager_EvictionAndPinning(t *testing.T) {
 	}
 
 	// Clean up by unpinning
-	bm.UnpinPage(0, false)
-	bm.UnpinPage(1, false)
-	bm.UnpinPage(2, false)
+	bm.UnpinPage(0, false, true)
+	bm.UnpinPage(1, false, true)
+	bm.UnpinPage(2, false, true)
 }
