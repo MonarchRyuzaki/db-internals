@@ -37,3 +37,19 @@ The Pager's `AllocatePage()` function is modified to check the Free Page List fi
 
 ### The Metadata Page
 To persistently manage this Free Page List, we will introduce a "Meta-Page" (typically `PageID 0`), which persistently stores global database pointers, including the `FirstFreePageID`.
+
+---
+
+## 4. Architectural Note: "Ghost" Routing Keys
+A common question arises when discussing the Vacuum process: *If we delete all the cells in a Leaf Node so that it becomes completely empty, don't we need to go up to the Parent Node and delete the routing key that points to it?*
+
+The answer is **No**, and understanding why is key to B+ Tree architecture.
+
+In a B+ Tree, data only lives in the leaves. The routing keys in the internal nodes are strictly **separators** (guideposts), not data records. 
+If a leaf splits and pushes the key `50` up to the parent, the parent knows that everything in the left child is `< 50` and everything in the right child is `>= 50`. 
+If the user later deletes the record `50` from the database, the right leaf might only contain `[60]`. 
+The parent **still** has the routing key `50`. This is perfectly mathematically valid! The routing key `50` still perfectly separates the left side (`40`) from the right side (`60`). 
+
+**The Trade-off:**
+If we forced the Vacuum process to remove empty leaf nodes and update parent routing keys, we would have to implement complex recursive B-Tree node merging (underflow handling) which requires stalling the database with heavy locks. 
+By allowing these "ghost" routing keys to remain in the internal nodes indefinitely, we trade a microscopic amount of wasted disk space in exchange for incredibly fast, lock-free, and simple deletions. 

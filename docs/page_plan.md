@@ -81,6 +81,6 @@ The steps below are skipped for now to prioritize understanding what pages look 
 
 * **Step 6 (Overflow Pages):** Implement overflow pages for large values that can't fit in a single page.✅
 * **Step 7 (Page Updates/Deletes):** Implement page update logic (if done in place, what if overflow?), delete, and reinsert (tombstone).✅
-* **Step 8 (Freeblock Management):** Implement `Delete` and the Availability List logic. This is the hardest part and usually involves writing a small "Freeblock" management helper.
-
-> **Recommendation:** Start with `cell.go`. Once you can convert a record into a byte slice, the rest of the page management becomes much easier to visualize. (Completed)
+* **Step 8 (Vacuum Process & Meta-Page):** Implement a background Vacuum process to clear Tombstones, and a Meta-Page (Page 0) to track the Free Page List (reusing empty and overflow pages).
+* **Step 9 (Benchmarking):** Write a small benchmark script to measure raw Insert/Get operations per second and prove the engine's speed.
+* **Step 10 (Interactive REPL):** Build a simple command-line REPL (e.g., `PUT key val`, `GET key`) to demonstrate the working database interactively.
