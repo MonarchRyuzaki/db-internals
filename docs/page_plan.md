@@ -73,14 +73,14 @@ This document outlines the phased implementation plan for the database storage e
 The steps below are skipped for now to prioritize understanding what pages look like in practice. The revised order of development will be:
 1. **Buffer Manager** ✅
 2. **B+ Tree Implementation** ✅
-3. **Updation and Deletion (Page internals)**
+3. **Updation and Deletion (Page internals)**✅
 
 ---
 
 ## Upcoming Advanced Steps
 
-* **Step 6 (Overflow Pages):** Implement overflow pages for large values that can't fit in a single page.
-* **Step 7 (Page Updates/Deletes):** Implement page update logic (if done in place, what if overflow?), delete, and reinsert (tombstone).
+* **Step 6 (Overflow Pages):** Implement overflow pages for large values that can't fit in a single page.✅
+* **Step 7 (Page Updates/Deletes):** Implement page update logic (if done in place, what if overflow?), delete, and reinsert (tombstone).✅
 * **Step 8 (Freeblock Management):** Implement `Delete` and the Availability List logic. This is the hardest part and usually involves writing a small "Freeblock" management helper.
 
 > **Recommendation:** Start with `cell.go`. Once you can convert a record into a byte slice, the rest of the page management becomes much easier to visualize. (Completed)
