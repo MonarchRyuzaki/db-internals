@@ -137,3 +137,55 @@ func TestBTree_Delete(t *testing.T) {
 		t.Fatalf("Expected error when deleting non-existent key")
 	}
 }
+
+// TestBTree_Overflow verifies that values larger than a single page
+// are correctly chunked into Overflow Pages and can be reassembled flawlessly.
+func TestBTree_Overflow(t *testing.T) {
+	dir := t.TempDir()
+	
+	tree, err := NewBTree("overflow_test", dir)
+	if err != nil {
+		t.Fatalf("Failed to create BTree: %v", err)
+	}
+
+	// Create a 50KB payload
+	largePayload := make([]byte, 50000)
+	for i := 0; i < len(largePayload); i++ {
+		largePayload[i] = byte(i % 256)
+	}
+
+	// 1. Insert the massive payload
+	err = tree.Insert([]byte("massive_key"), largePayload)
+	if err != nil {
+		t.Fatalf("Failed to insert large payload: %v", err)
+	}
+
+	// 2. Retrieve the payload and verify length and content
+	retrieved, err := tree.Find([]byte("massive_key"))
+	if err != nil {
+		t.Fatalf("Failed to find massive_key: %v", err)
+	}
+
+	if len(retrieved) != len(largePayload) {
+		t.Fatalf("Retrieved payload length mismatch. Expected %d, got %d", len(largePayload), len(retrieved))
+	}
+
+	if !bytes.Equal(retrieved, largePayload) {
+		t.Fatalf("Retrieved payload content does not match original!")
+	}
+
+	// 3. Test that updating the massive key with a tiny value works (and tombstones/upserts correctly)
+	err = tree.Insert([]byte("massive_key"), []byte("tiny_value"))
+	if err != nil {
+		t.Fatalf("Failed to upsert massive_key: %v", err)
+	}
+
+	retrieved2, err := tree.Find([]byte("massive_key"))
+	if err != nil {
+		t.Fatalf("Failed to find massive_key after upsert: %v", err)
+	}
+
+	if !bytes.Equal(retrieved2, []byte("tiny_value")) {
+		t.Fatalf("Upsert over massive key failed. Expected 'tiny_value', got %s", string(retrieved2))
+	}
+}

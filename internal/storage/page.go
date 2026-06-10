@@ -3,6 +3,7 @@ package storage
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"hash/crc32"
 )
 
@@ -27,8 +28,8 @@ Slotted Page Memory Layout:
 +----------------+------------------------------------------+
 */
 
-// Note: Slot directory is currently unsorted (insertion order). 
-// A sorted index array can be maintained separately for binary 
+// Note: Slot directory is currently unsorted (insertion order).
+// A sorted index array can be maintained separately for binary
 // search within a page without changing slot IDs. Deferred.
 
 const (
@@ -56,6 +57,7 @@ const (
 const (
 	PageTypeLeaf     uint8 = 1
 	PageTypeInternal uint8 = 2
+	PageTypeOverflow uint8 = 3
 )
 
 type Page struct {
@@ -145,6 +147,9 @@ func (p *Page) GetData() []byte {
 // --- Data Operations ---
 
 func (p *Page) Insert(cellData []byte) (uint16, error) {
+	if p.GetPageType() != PageTypeInternal && p.GetPageType() != PageTypeLeaf {
+		return 0, fmt.Errorf("Cant perform Insert on page type : %d", p.GetPageType());
+	}
 	slotCount := p.getSlotCount()
 	freeOffset := p.getFreeSpaceOffset()
 
@@ -172,6 +177,9 @@ func (p *Page) Insert(cellData []byte) (uint16, error) {
 }
 
 func (p *Page) Get(slotID uint16) ([]byte, error) {
+	if p.GetPageType() != PageTypeInternal && p.GetPageType() != PageTypeLeaf {
+		return nil, fmt.Errorf("Cant perform Get on page type : %d", p.GetPageType());
+	}
 	slotCount := p.getSlotCount()
 	if slotID >= slotCount {
 		return nil, errors.New("invalid slot id")
@@ -182,4 +190,30 @@ func (p *Page) Get(slotID uint16) ([]byte, error) {
 	cellSize := binary.LittleEndian.Uint16(p.data[slotEntryOffset+2 : slotEntryOffset+4])
 
 	return p.data[cellOffset : cellOffset+cellSize], nil
+}
+
+// --- Overflow Page Operations ---
+
+const overflowNextPageOffset = HeaderSize // 32
+const overflowDataOffset = 36
+const MaxOverflowDataSize = PageSize - overflowDataOffset // 4060
+
+func (p *Page) GetNextOverflowPageID() uint32 {
+	return binary.LittleEndian.Uint32(p.data[overflowNextPageOffset : overflowNextPageOffset+4])
+}
+
+func (p *Page) SetNextOverflowPageID(id uint32) {
+	binary.LittleEndian.PutUint32(p.data[overflowNextPageOffset:overflowNextPageOffset+4], id)
+}
+
+func (p *Page) WriteOverflowData(data []byte) {
+	copy(p.data[overflowDataOffset:], data)
+}
+
+func (p *Page) ReadOverflowData(length uint32) []byte {
+	// Prevent reading out of bounds
+	if length > MaxOverflowDataSize {
+		length = MaxOverflowDataSize
+	}
+	return p.data[overflowDataOffset : overflowDataOffset+length]
 }

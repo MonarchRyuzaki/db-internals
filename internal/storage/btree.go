@@ -16,6 +16,7 @@ be swapped in later if range queries become necessary!
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -141,6 +142,9 @@ func (tree *BTree) Find(key []byte) ([]byte, error) {
 			if kv.IsDeleted() {
 				return nil, fmt.Errorf("key not found") // It was tombstoned!
 			}
+			if kv.IsOverflow() {
+				return tree.readOverflowChain(kv.Value)
+			}
 			return kv.Value, nil // Found it!
 		}
 	}
@@ -169,6 +173,17 @@ func (tree *BTree) upsertCell(key []byte, value []byte, flag uint8) error {
 	slotCount := leaf.getSlotCount()
 	var cells [][]byte
 	keyExists := false
+
+	// If the value is huge, we move it to overflow pages right now!
+	const MaxInlineValueSize = 1024
+	if len(value) > MaxInlineValueSize {
+		metadata, err := tree.createOverflowChain(value)
+		if err != nil {
+			return err
+		}
+		value = metadata
+		flag |= KEY_OVERFLOW_FLAG
+	}
 
 	newCell := NewKVCell(flag, key, value)
 	cellBytes := newCell.Serialize()
@@ -362,4 +377,87 @@ func (tree *BTree) splitInternal(internalNode *Page, path []uint32, newCell []by
 	return tree.insertIntoParent(internalNode.GetPageID(), routingCell, path)
 }
 
+// createOverflowChain chunks a large value across multiple Overflow Pages.
+// It returns the 8-byte metadata slice [FirstPageID(4), TotalLength(4)] to be stored in the KVCell.
+func (tree *BTree) createOverflowChain(value []byte) ([]byte, error) {
+	var firstPageID uint32
+	var prevPage *Page
 
+	dataRemaining := value
+
+	for len(dataRemaining) > 0 {
+		newPageID, err := tree.bm.pager.AllocatePage(PageTypeOverflow)
+		if err != nil {
+			return nil, err
+		}
+
+		page, err := tree.bm.FetchPage(newPageID, PageTypeOverflow)
+		if err != nil {
+			return nil, err
+		}
+
+		if firstPageID == 0 {
+			firstPageID = newPageID
+		}
+
+		// Link the previous page to this new page
+		if prevPage != nil {
+			prevPage.SetNextOverflowPageID(newPageID)
+			tree.bm.UnpinPage(prevPage.GetPageID(), true) // Done with the prev page
+		}
+
+		chunkSize := len(dataRemaining)
+		if chunkSize > MaxOverflowDataSize {
+			chunkSize = MaxOverflowDataSize
+		}
+
+		page.SetNextOverflowPageID(0) // Default: no next page
+		page.WriteOverflowData(dataRemaining[:chunkSize])
+		dataRemaining = dataRemaining[chunkSize:]
+
+		// If this is the last chunk, we are done with this page
+		if len(dataRemaining) == 0 {
+			tree.bm.UnpinPage(newPageID, true)
+		} else {
+			// Keep it pinned for the next iteration to link to
+			prevPage = page
+		}
+	}
+
+	metadata := make([]byte, 8)
+	binary.LittleEndian.PutUint32(metadata[0:4], firstPageID)
+	binary.LittleEndian.PutUint32(metadata[4:8], uint32(len(value)))
+	return metadata, nil
+}
+
+// readOverflowChain fetches the chain of Overflow Pages and reassembles the large value.
+func (tree *BTree) readOverflowChain(metadata []byte) ([]byte, error) {
+	currPageID := binary.LittleEndian.Uint32(metadata[0:4])
+	totalLength := binary.LittleEndian.Uint32(metadata[4:8])
+
+	result := make([]byte, 0, totalLength)
+	bytesRead := uint32(0)
+
+	for currPageID != 0 {
+		page, err := tree.bm.FetchPage(currPageID, PageTypeOverflow)
+		if err != nil {
+			return nil, err
+		}
+
+		chunkSize := totalLength - bytesRead
+		if chunkSize > MaxOverflowDataSize {
+			chunkSize = MaxOverflowDataSize
+		}
+
+		chunk := page.ReadOverflowData(chunkSize)
+		result = append(result, chunk...)
+		bytesRead += chunkSize
+
+		nextPageID := page.GetNextOverflowPageID()
+		tree.bm.UnpinPage(currPageID, false)
+
+		currPageID = nextPageID
+	}
+
+	return result, nil
+}

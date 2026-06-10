@@ -16,6 +16,7 @@ type KVCell struct {
 }
 
 const KEY_DELETED_FLAG uint8 = 1 << 1
+const KEY_OVERFLOW_FLAG uint8 = 1 << 2
 
 // KeyCell Layout: [ChildPageID (4b)][KeyLen (2b)][Key...]
 func (k *KeyCell) Size() int {
@@ -89,4 +90,12 @@ func (k *KVCell) IsDeleted() bool {
 
 func (k *KVCell) SetDeleted() {
 	k.Flag |= KEY_DELETED_FLAG
+}
+
+func (k *KVCell) IsOverflow() bool {
+	return (k.Flag & KEY_OVERFLOW_FLAG) != 0
+}
+
+func (k *KVCell) SetOverflow() {
+	k.Flag |= KEY_OVERFLOW_FLAG
 }
