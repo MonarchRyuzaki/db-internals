@@ -36,8 +36,9 @@ func DeserializeKeyCell(data []byte) *KeyCell {
 	k := &KeyCell{}
 	k.ChildPageID = binary.LittleEndian.Uint32(data[0:4])
 	keyLen := binary.LittleEndian.Uint16(data[4:6])
-	k.Key = make([]byte, keyLen)
-	copy(k.Key, data[6:6+keyLen])
+	// k.Key = make([]byte, keyLen)
+	// copy(k.Key, data[6:6+keyLen])
+	k.Key = data[6:6+keyLen]
 	return k
 }
 
@@ -62,10 +63,13 @@ func DeserializeKVCell(data []byte) *KVCell {
 	k.Flag = data[0]
 	keyLen := binary.LittleEndian.Uint16(data[1:3])
 	valLen := binary.LittleEndian.Uint16(data[3:5])
-	k.Key = make([]byte, keyLen)
-	k.Value = make([]byte, valLen)
-	copy(k.Key, data[5:5+keyLen])
-	copy(k.Value, data[5+keyLen:5+keyLen+valLen])
+	// k.Key = make([]byte, keyLen)
+	// k.Value = make([]byte, valLen)
+	// copy(k.Key, data[5:5+keyLen])
+	// copy(k.Value, data[5+keyLen:5+keyLen+valLen])
+
+	k.Key = data[5:5+keyLen]
+	k.Value = data[5+keyLen:5+keyLen+valLen]
 	return k
 }
 
