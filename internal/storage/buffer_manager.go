@@ -175,3 +175,27 @@ func (bm *BufferManager) firstFind() (uint32, *Frame, bool) {
 	}
 	return 0, nil, false
 }
+
+// FlushAll writes all dirty pages to disk.
+func (bm *BufferManager) FlushAll() error {
+	bm.mu.Lock()
+	defer bm.mu.Unlock()
+
+	for id, frame := range bm.pageTable {
+		if frame.IsDirty {
+			if err := bm.pager.WritePage(id, frame.Page); err != nil {
+				return err
+			}
+			frame.IsDirty = false
+		}
+	}
+	return nil
+}
+
+// Close flushes all pages and closes the pager.
+func (bm *BufferManager) Close() error {
+	if err := bm.FlushAll(); err != nil {
+		return err
+	}
+	return bm.pager.Close()
+}

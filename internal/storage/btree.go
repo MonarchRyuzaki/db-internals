@@ -104,6 +104,14 @@ func NewBTree(tableName string, dir string) (*BTree, error) {
 	return tree, nil
 }
 
+// Close gracefully shuts down the BTree by flushing all buffers and closing files.
+func (tree *BTree) Close() error {
+	if tree.wal != nil {
+		tree.wal.Close()
+	}
+	return tree.bm.Close()
+}
+
 // allocatePage checks the Free Page List on the Meta Page. If a free page is available,
 // it pops it and reuses it. Otherwise, it calls pager.AllocatePage to append to the file.
 func (tree *BTree) allocatePage(pageType uint8) (uint32, error) {
@@ -216,6 +224,10 @@ func (tree *BTree) findLeafPage(key []byte, forWrite bool) (*Page, []uint32, err
 
 		// Unpin the current internal node since we are done with it
 		tree.bm.UnpinPage(currPageID, false, false)
+
+		if nextChildID == 0 {
+			return nil, nil, fmt.Errorf("database corrupted: child pointer is 0 (infinite loop prevented)")
+		}
 
 		currPageID = nextChildID
 	}

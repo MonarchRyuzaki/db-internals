@@ -23,6 +23,9 @@ func main() {
 	// Start the background vacuum process to clean up tombstones every 10 seconds
 	db.StartVacuumRoutine(10 * time.Second)
 
+	// Ensure we flush everything when we exit!
+	defer db.Close()
+
 	fmt.Println("Database initialized successfully! (Running on custom B-Tree with Page-Level Latching)")
 	fmt.Println("Available commands:")
 	fmt.Println("  SET <key> <value>")
