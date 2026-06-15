@@ -38,3 +38,19 @@ Physiological redo logs assume the underlying physical page is intact. If we app
 We have chosen to implement **Strategy 1: Full Page Writes** because it perfectly integrates into our existing append-only WAL architecture. We do not need to manage a separate, complex Doublewrite Buffer file. 
 
 Instead, we will add an `IsFullPage` flag to our `LogRecord`. The first time the Buffer Manager dirties a clean page, it will ask the WAL to append the entire 4KB byte array. Subsequent edits to that page will just append tiny physiological records. During recovery, if we see an `IsFullPage` flag, we completely overwrite the B-Tree page with the payload before continuing.
+
+---
+
+## 4. Implementation Details
+
+### The Durability Guarantee (What if we crash before `fsync`?)
+A common question is: *What happens if we mutate a page in RAM, append the log to the WAL in RAM, and the power fails before the WAL is flushed to disk?*
+
+If this happens, the data is lost. **And this is 100% correct behavior.**
+
+In an ACID database, a transaction is not considered durable until the `COMMIT` log record has been successfully `fsync`'d to the physical disk. If the database crashes before the `fsync` finishes, the user's connection will drop and they will never receive an "OK / 200 Success" response. 
+
+From the user's perspective, the transaction failed, so they will safely retry it. From the database's perspective, the crash erased both the dirty memory page and the un-flushed WAL record, meaning it boots up in a perfectly consistent state as if the transaction never happened. 
+
+**The Golden Rule of Durability:** The database must never acknowledge a commit to the user until `wal.Sync()` returns successfully.
+**The Golden Rule of Write-Ahead Logging:** The WAL must always be physically flushed to disk up to a page's `PageLSN` before that dirty page is allowed to be evicted and flushed to the main `.db` file.
