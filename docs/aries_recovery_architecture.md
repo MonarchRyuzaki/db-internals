@@ -31,8 +31,14 @@ When recovering from a sudden power loss, the database boots up, finds the lates
 1. **Analysis Phase:** 
    Start at the Checkpoint and read forward. Reconstruct the Active Transaction Table and the Dirty Page Table to figure out exactly what was happening the millisecond the power died. Find the absolute smallest `RecLSN` in the Dirty Page Table (we will call this `MinLSN`).
 2. **Redo Phase (Repeating History):** 
-   Jump directly to `MinLSN` in the WAL and read to the end of the file. We blindly **REDO EVERYTHING**—even for transactions that didn't commit! 
-   *Logic:* Read the physical page from disk. If the page's header `LSN` is less than the log's `LSN`, we re-apply the `INSERT`/`DELETE` payload from the log. By repeating history, we put the RAM exactly back into the physical state it was in before the crash.
+   Jump directly to `MinLSN` in the WAL and read to the end of the file. We wildly "Repeat History" by blindly attempting to REDO EVERYTHING—even for transactions that didn't commit! However, to maximize performance, ARIES applies **3 strict rules** to skip redoing a log record if it's already safe on disk:
+   
+   - **Rule 1: Is the PageID missing from the Dirty Page Table?** 
+     If it's not in the DPT, the page was clean during the crash. Ignore the log record entirely without hitting the disk.
+   - **Rule 2: Is the Log Record's `LSN` < `RecLSN`?** 
+     If the DPT says the page's `RecLSN` is 70, but the log record is LSN 50, it means LSN 50 was successfully flushed (which reset the RecLSN to 0, until it became 70 later). We can safely ignore LSN 50 without hitting the disk.
+   - **Rule 3: The Physical `PageLSN` Check** 
+     If it passes Rules 1 and 2, ARIES conservatively assumes the page *might* be dirty. It fetches the physical 4KB page from disk. If the header's `PageLSN` is `>=` the log record's `LSN`, the change actually *did* make it to disk before the crash (but a checkpoint hadn't noticed yet). We ignore it. If the `PageLSN` is `< LSN`, we finally re-apply the log's payload!
 3. **Undo Phase:** 
    Now that the memory state is restored, we look at our Active Transaction Table. We find all transactions that never logged a `COMMIT`, and we scan backward, undoing their operations (which simply means deleting their uncommitted MVCC records).
 
