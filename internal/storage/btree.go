@@ -112,6 +112,30 @@ func (tree *BTree) Close() error {
 	return tree.bm.Close()
 }
 
+// Checkpoint performs a fuzzy checkpoint and writes the Checkpoint LSN to a .checkpoint file.
+func (tree *BTree) Checkpoint() error {
+	if tree.wal == nil {
+		return nil
+	}
+	
+	dpt := tree.bm.GetDirtyPageTable()
+	lsn, err := tree.wal.WriteCheckpoint(dpt)
+	if err != nil {
+		return fmt.Errorf("failed to write checkpoint to WAL: %w", err)
+	}
+
+	// Write the Checkpoint LSN to a .checkpoint file atomically
+	chkPath := filepath.Join(filepath.Dir(tree.bm.pager.file.Name()), "checkpoint.meta")
+	buf := make([]byte, 8)
+	binary.LittleEndian.PutUint64(buf, lsn)
+	
+	err = os.WriteFile(chkPath + ".tmp", buf, 0644)
+	if err != nil {
+		return err
+	}
+	return os.Rename(chkPath + ".tmp", chkPath)
+}
+
 // allocatePage checks the Free Page List on the Meta Page. If a free page is available,
 // it pops it and reuses it. Otherwise, it calls pager.AllocatePage to append to the file.
 func (tree *BTree) allocatePage(pageType uint8) (uint32, error) {

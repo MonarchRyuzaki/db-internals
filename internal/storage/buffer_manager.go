@@ -5,13 +5,14 @@ import (
 	"sync"
 )
 
-// Frame represents a single slot in memory that holds a cached page.
+// Frame represents a page in the buffer pool.
 type Frame struct {
-	Page          *Page  // Pointer to the actual 4KB page data
-	IsDirty       bool   // True if the page has been modified since being read from disk
-	PinCount      uint32 // Number of active threads using this page
-	ReferenceBits uint16 // Used for page replacement policy
+	Page          *Page        // Pointer to the actual 4KB page data
+	IsDirty       bool         // True if the page has been modified since being read from disk
+	PinCount      uint32       // Number of active threads using this page
+	ReferenceBits uint16       // Used for page replacement policy
 	Latch         sync.RWMutex // Page-level lock
+	RecLSN        uint64       // The LSN of the first log record that dirtied this page
 }
 
 // BufferManager handles the caching of disk pages in memory.
@@ -73,6 +74,7 @@ func (bm *BufferManager) FetchPageForWrite(pageID uint32, fallbackPageMode uint8
 			return nil, err
 		}
 		frame.Page.SetLSN(lsn)
+		frame.RecLSN = lsn
 	}
 
 	return frame.Page, nil
@@ -161,6 +163,8 @@ func (bm *BufferManager) evict() error {
 		if err := bm.pager.WritePage(victimID, victimFrame.Page); err != nil {
 			return err
 		}
+		victimFrame.IsDirty = false
+		victimFrame.RecLSN = 0
 	}
 
 	delete(bm.pageTable, victimID)
@@ -187,6 +191,7 @@ func (bm *BufferManager) FlushAll() error {
 				return err
 			}
 			frame.IsDirty = false
+			frame.RecLSN = 0
 		}
 	}
 	return nil
@@ -198,4 +203,18 @@ func (bm *BufferManager) Close() error {
 		return err
 	}
 	return bm.pager.Close()
+}
+
+// GetDirtyPageTable returns a snapshot of all currently dirty pages and their RecLSN.
+func (bm *BufferManager) GetDirtyPageTable() map[uint32]uint64 {
+	bm.mu.Lock()
+	defer bm.mu.Unlock()
+
+	dpt := make(map[uint32]uint64)
+	for id, frame := range bm.pageTable {
+		if frame.IsDirty {
+			dpt[id] = frame.RecLSN
+		}
+	}
+	return dpt
 }

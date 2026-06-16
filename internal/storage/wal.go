@@ -16,6 +16,7 @@ const (
 	LogOpCommit   uint8 = 4
 	LogOpAbort    uint8 = 5
 	LogOpCLR      uint8 = 6 // Compensation Log Record (Repeating History during Undo)
+	LogOpCheckpoint uint8 = 7 // Fuzzy Checkpoint
 )
 
 // LogRecord represents a single physiological operation in the WAL.
@@ -154,4 +155,25 @@ func (w *WAL) Close() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return w.file.Close()
+}
+
+// WriteCheckpoint writes a Checkpoint record and flushes it, returning the LSN.
+// It serializes the Dirty Page Table into the Value payload.
+func (w *WAL) WriteCheckpoint(dpt map[uint32]uint64) (uint64, error) {
+	// Serialize DPT: 4 bytes len + 12 bytes per entry
+	buf := make([]byte, 4 + len(dpt)*12)
+	binary.LittleEndian.PutUint32(buf[0:4], uint32(len(dpt)))
+	offset := 4
+	for pageID, recLSN := range dpt {
+		binary.LittleEndian.PutUint32(buf[offset:offset+4], pageID)
+		binary.LittleEndian.PutUint64(buf[offset+4:offset+12], recLSN)
+		offset += 12
+	}
+	
+	// Append the checkpoint record (TxnID=0, PageID=0)
+	lsn, err := w.Append(0, 0, LogOpCheckpoint, nil, buf)
+	if err != nil {
+		return 0, err
+	}
+	return lsn, nil
 }
