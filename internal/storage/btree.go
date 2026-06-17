@@ -65,8 +65,9 @@ func NewBTree(tableName string, dir string) (*BTree, error) {
 	}
 
 	// Run ARIES Recovery before doing anything else
-	if err := tree.Recover(); err != nil {
-		return nil, fmt.Errorf("ARIES recovery failed: %w", err)
+	err = tree.Recover()
+	if err != nil {
+		return nil, fmt.Errorf("failed during recovery: %w", err)
 	}
 
 	path := filepath.Join(dir, filename)
@@ -95,6 +96,12 @@ func NewBTree(tableName string, dir string) (*BTree, error) {
 		}
 		metaPage.SetRootPageID(rootID)
 		metaPage.SetFirstFreePageID(0)
+		
+		if tree.wal != nil {
+			lsn, _ := tree.wal.Append(0, metaID, LogOpFullPage, nil, metaPage.GetData())
+			metaPage.SetLSN(lsn)
+		}
+		
 		bm.UnpinPage(metaID, true, true)
 
 		tree.rootPageID = rootID
@@ -494,6 +501,14 @@ func (tree *BTree) splitLeafCells(leaf *Page, path []uint32, cells [][]byte) err
 	routingKey := DeserializeKVCell(cells[mid]).Key
 	routingCell := NewKeyCell(newLeafID, routingKey).Serialize()
 
+	// Log AFTER state of split pages
+	if tree.wal != nil {
+		lsn1, _ := tree.wal.Append(0, leaf.GetPageID(), LogOpFullPage, nil, leaf.GetData())
+		leaf.SetLSN(lsn1)
+		lsn2, _ := tree.wal.Append(0, newLeaf.GetPageID(), LogOpFullPage, nil, newLeaf.GetData())
+		newLeaf.SetLSN(lsn2)
+	}
+
 	// 6. Unpin both leaves (they are dirty now)
 	tree.bm.UnpinPage(leaf.GetPageID(), true, true)
 	tree.bm.UnpinPage(newLeafID, true, true)
@@ -515,6 +530,24 @@ func (tree *BTree) insertIntoParent(leftChildID uint32, routingCell []byte, path
 		newRoot.Insert(routingCell)
 
 		tree.rootPageID = newRootID
+
+		if tree.wal != nil {
+			lsn, _ := tree.wal.Append(0, newRootID, LogOpFullPage, nil, newRoot.GetData())
+			newRoot.SetLSN(lsn)
+		}
+
+		// Update Meta Page
+		metaPage, _ := tree.bm.FetchPageForWrite(MetaPageID, PageTypeMeta)
+		if metaPage != nil {
+			metaPage.SetRootPageID(newRootID)
+			
+			if tree.wal != nil {
+				lsn, _ := tree.wal.Append(0, MetaPageID, LogOpFullPage, nil, metaPage.GetData())
+				metaPage.SetLSN(lsn)
+			}
+			tree.bm.UnpinPage(MetaPageID, true, true)
+		}
+
 		return tree.bm.UnpinPage(newRootID, true, true)
 	}
 
@@ -556,6 +589,11 @@ func (tree *BTree) insertIntoParent(leftChildID uint32, routingCell []byte, path
 		parent.Init(PageTypeInternal)
 		for _, c := range cells {
 			parent.Insert(c)
+		}
+
+		if tree.wal != nil {
+			lsn, _ := tree.wal.Append(0, parentID, LogOpFullPage, nil, parent.GetData())
+			parent.SetLSN(lsn)
 		}
 
 		return tree.bm.UnpinPage(parentID, true, true)
@@ -621,6 +659,13 @@ func (tree *BTree) splitInternal(internalNode *Page, path []uint32, newCell []by
 	}
 
 	routingCell := NewKeyCell(newInternalID, routingKey).Serialize()
+
+	if tree.wal != nil {
+		lsn1, _ := tree.wal.Append(0, internalNode.GetPageID(), LogOpFullPage, nil, internalNode.GetData())
+		internalNode.SetLSN(lsn1)
+		lsn2, _ := tree.wal.Append(0, newInternalID, LogOpFullPage, nil, newInternal.GetData())
+		newInternal.SetLSN(lsn2)
+	}
 
 	tree.bm.UnpinPage(internalNode.GetPageID(), true, true)
 	tree.bm.UnpinPage(newInternalID, true, true)

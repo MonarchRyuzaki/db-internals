@@ -39,6 +39,13 @@ func (tree *BTree) Recover() error {
 	// Analysis Phase
 	dpt := make(map[uint32]uint64) // Dirty Page Table
 	lsn := checkpointLSN
+	if lsn == 0 {
+		// Only skip 4 bytes if the file actually has the magic header
+		buf := make([]byte, 4)
+		if n, _ := wal.file.ReadAt(buf, 0); n == 4 && string(buf) == "WAL\n" {
+			lsn = 4
+		}
+	}
 	
 	fmt.Println("[Recovery] Analysis Phase...")
 	for {
@@ -82,6 +89,12 @@ func (tree *BTree) Recover() error {
 
 	// Redo Phase (Repeating History)
 	lsn = minLSN
+	if lsn == 0 {
+		buf := make([]byte, 4)
+		if n, _ := wal.file.ReadAt(buf, 0); n == 4 && string(buf) == "WAL\n" {
+			lsn = 4
+		}
+	}
 	fmt.Println("[Recovery] Redo Phase...")
 	
 	redoCount := 0
@@ -110,7 +123,7 @@ func (tree *BTree) Recover() error {
 			return fmt.Errorf("failed to fetch page %d during redo: %w", rec.PageID, err)
 		}
 
-		if page.GetLSN() >= rec.LSN {
+		if page.GetLSN() >= rec.LSN && rec.LSN != 0 {
 			// Safely flushed!
 			tree.bm.UnpinPage(rec.PageID, false, true)
 			lsn += uint64(size)
