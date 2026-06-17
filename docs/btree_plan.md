@@ -76,3 +76,14 @@ We will maintain a `Stack` (a simple slice of `uint32` PageIDs) during traversal
   2. When a user calls `Delete(key)`, we simply perform an `Upsert` that swaps the existing cell out for a new one with the deleted flag set.
   3. When `Find(key)` locates a key, it checks the flag. If it's deleted, it pretends the key doesn't exist and returns an error.
   4. **Future Cleanup:** By pushing the deletion complexity to a background "Vacuum" or "Garbage Collection" process later, we significantly simplify the core storage engine. The Vacuum process can occasionally scan pages, physically remove tombstoned cells, and reclaim free space asynchronously.
+
+## 5. Architectural Tradeoff: Unsorted Pages (Brute-Force Scans)
+In a traditional B-Tree implementation (like PostgreSQL or SQLite), the elements within every single page are kept strictly sorted. This allows the system to use Binary Search to find routing pointers and leaf data.
+
+However, to drastically reduce code complexity and avoid shifting bytes around on every single insert, **our slotted pages store cells strictly in insertion order**. They are completely unsorted within the page boundary!
+
+* **How it works:** Because a 4KB page can only physically hold around ~150 keys, we use a brute-force linear scan across the slots to find the required key or `MAX()` routing pointer. 
+* **Why it is fast:** Modern CPU architectures execute linear scans over tiny contiguous memory arrays (like 150 slot offsets) entirely within the ultra-fast L1 cache. The performance penalty of O(N) over O(Log N) at this microscopic scale is invisible.
+* **When we DO sort:** To maintain the *global* B-Tree invariants, we only manually sort the keys using Go's `sort.Slice` right before a page **splits**, ensuring the left page and right page receive mathematically separated key ranges.
+
+> **Note:** If Range Queries (`Scan(start, end)`) are added in the future, this tradeoff will need to be reconsidered, as Range Queries require strict in-page alphabetical ordering to avoid on-the-fly sorting overhead.
