@@ -2,3 +2,4 @@ Database Internals.pdf
 *.txt
 *.db
 *.wal
+*.meta

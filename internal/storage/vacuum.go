@@ -6,6 +6,8 @@ import (
 	"time"
 )
 
+// TODO: Since we are doing MVCC, we must delete all older versions of a node when a newer version has a DELETED FLAG
+
 // StartVacuumRoutine launches a background goroutine that runs the vacuum process periodically.
 func (tree *BTree) StartVacuumRoutine(interval time.Duration) {
 	go func() {

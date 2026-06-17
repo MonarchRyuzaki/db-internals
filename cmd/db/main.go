@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/MonarchRyuzaki/db-internals/internal/engine"
 	"github.com/MonarchRyuzaki/db-internals/internal/storage"
 )
 
@@ -21,10 +22,13 @@ func main() {
 	}
 
 	// Start the background vacuum process to clean up tombstones every 10 seconds
-	db.StartVacuumRoutine(10 * time.Second)
+	// db.StartVacuumRoutine(10 * time.Second)
 	
 	// Start the background checkpoint process to limit recovery time (every 30 seconds for testing)
 	db.StartCheckpointRoutine(30 * time.Second)
+
+	// Wrap the BTree in our MVCC Engine
+	mvccDB := engine.NewDB(db)
 
 	// Ensure we flush everything when we exit!
 	defer db.Close()
@@ -59,11 +63,11 @@ func main() {
 				fmt.Println("Usage: SET <key> <value>")
 				continue
 			}
-			key := []byte(parts[1])
-			value := []byte(parts[2])
+			key := parts[1]
+			value := parts[2]
 
 			start := time.Now()
-			err := db.Insert(key, value)
+			err := mvccDB.Set(key, value)
 			if err != nil {
 				fmt.Printf("Error: %v\n", err)
 			} else {
@@ -75,14 +79,14 @@ func main() {
 				fmt.Println("Usage: GET <key>")
 				continue
 			}
-			key := []byte(parts[1])
+			key := parts[1]
 
 			start := time.Now()
-			val, err := db.Find(key)
+			val, err := mvccDB.Get(key)
 			if err != nil {
 				fmt.Printf("Error: %v\n", err)
 			} else {
-				fmt.Printf("\"%s\" (took %v)\n", string(val), time.Since(start))
+				fmt.Printf("\"%s\" (took %v)\n", val, time.Since(start))
 			}
 
 		case "DELETE":
@@ -90,10 +94,10 @@ func main() {
 				fmt.Println("Usage: DELETE <key>")
 				continue
 			}
-			key := []byte(parts[1])
+			key := parts[1]
 
 			start := time.Now()
-			err := db.Delete(key)
+			err := mvccDB.Delete(key)
 			if err != nil {
 				fmt.Printf("Error: %v\n", err)
 			} else {

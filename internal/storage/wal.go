@@ -113,10 +113,20 @@ func NewWAL(path string) (*WAL, error) {
 	}
 
 	stat, _ := file.Stat()
+	size := stat.Size()
+	
+	if size == 0 {
+		// Write a 4-byte magic header so LSN 0 is never used for a valid record.
+		// This prevents collisions with uninitialized pages which have LSN 0.
+		magic := []byte("WAL\n")
+		file.Write(magic)
+		file.Sync()
+		size = 4
+	}
 
 	wal := &WAL{
 		file:       file,
-		currentLSN: uint64(stat.Size()), // LSN is exactly the physical byte offset!
+		currentLSN: uint64(size), // LSN is exactly the physical byte offset!
 	}
 
 	return wal, nil
