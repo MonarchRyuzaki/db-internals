@@ -13,6 +13,8 @@ A lightning-fast, disk-backed Key-Value storage engine built entirely from scrat
 - **Buffer Pool Manager**: Intelligent memory caching layer that prevents thrashing the physical disk.
 - **Background Vacuuming**: Deletions use *Tombstones*. A background goroutine periodically runs a Depth-First Search (DFS) Latch Crabbing traversal to drop tombstones and rewrite pages.
 - **O(1) Space Reclamation**: Freed pages and dead overflow chains are instantly pushed to a persistent Free Page Stack (tracked by the `MetaPage`) and immediately reused during the next allocation, preventing disk bloat.
+- **Write-Ahead Logging (WAL)**: Custom physiological logging mechanism utilizing raw byte offsets for continuous disk syncing without blocking page evictions.
+- **ARIES Recovery System**: Full implementation of the ARIES protocol including Fuzzy Checkpointing, Analysis, and Redo (Repeating History). Guarantees absolute ACID durability and zero data loss against sudden power failures.
 
 ## ⚡ Performance 
 
@@ -60,3 +62,5 @@ Shutting down database...
 If you want to learn more about how the internals of this database work, read the detailed architectural design documents:
 - [Mutation & Vacuum Architecture](./docs/mutation_and_vacuum_plan.md)
 - [Zero-Copy Optimization Case Study](./res/High%20Allocs%20Case%20Study.md)
+- [ARIES Recovery Architecture](./docs/aries_recovery_architecture.md)
+- [ARIES Meta Page Bug Fix](./docs/aries_meta_page_recovery_bug.md)
