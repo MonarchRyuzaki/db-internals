@@ -2,15 +2,15 @@ package storage
 
 /*
 NOTE ON IMPLEMENTATION:
-Although often referred to interchangeably, what is implemented here is functionally 
-closer to a B-Tree (storing data exclusively in leaf nodes) but it lacks the 
-next/sibling leaf pointers required by a true B+ Tree. 
+Although often referred to interchangeably, what is implemented here is functionally
+closer to a B-Tree (storing data exclusively in leaf nodes) but it lacks the
+next/sibling leaf pointers required by a true B+ Tree.
 
 Because of this, this tree is highly optimized for POINT QUERIES (Insert, Find, Delete),
 but is not currently equipped for efficient sequential RANGE QUERIES.
 
-However, because the storage engine uses a swappable `Index` interface, a true 
-B+ Tree implementation (with sibling pointers in the page headers) can easily 
+However, because the storage engine uses a swappable `Index` interface, a true
+B+ Tree implementation (with sibling pointers in the page headers) can easily
 be swapped in later if range queries become necessary!
 */
 
@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"time"
 )
 
 // Index is the interface that any tree or hash index must implement.
@@ -33,6 +34,7 @@ type Index interface {
 // BTree implements the Index interface using a B+ Tree over the BufferManager.
 type BTree struct {
 	bm         *BufferManager
+	wal        *WAL
 	rootPageID uint32
 }
 
@@ -40,18 +42,30 @@ type BTree struct {
 // and pager using the table name.
 func NewBTree(tableName string, dir string) (*BTree, error) {
 	if dir == "" {
-		dir = "." 
+		dir = "."
 	}
 	filename := tableName + ".db"
+	walPath := filepath.Join(dir, tableName+".wal")
 
-	bm, err := NewBufferManager(dir, filename, 100)
+	wal, err := NewWAL(walPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize wal: %w", err)
+	}
+
+	bm, err := NewBufferManager(dir, filename, 100, wal)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize buffer manager: %w", err)
 	}
 
 	tree := &BTree{
 		bm:         bm,
-		rootPageID: 0, 
+		wal:        wal,
+		rootPageID: 0,
+	}
+
+	// Run ARIES Recovery before doing anything else
+	if err := tree.Recover(); err != nil {
+		return nil, fmt.Errorf("ARIES recovery failed: %w", err)
 	}
 
 	path := filepath.Join(dir, filename)
@@ -66,7 +80,7 @@ func NewBTree(tableName string, dir string) (*BTree, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to allocate meta page: %w", err)
 		}
-		
+
 		// Allocate Page 1 (Root Leaf Page)
 		rootID, err := bm.pager.AllocatePage(PageTypeLeaf)
 		if err != nil {
@@ -94,6 +108,54 @@ func NewBTree(tableName string, dir string) (*BTree, error) {
 	}
 
 	return tree, nil
+}
+
+// Close gracefully shuts down the BTree by flushing all buffers and closing files.
+func (tree *BTree) Close() error {
+	if tree.wal != nil {
+		tree.wal.Close()
+	}
+	return tree.bm.Close()
+}
+
+// Checkpoint performs a fuzzy checkpoint and writes the Checkpoint LSN to a .checkpoint file.
+func (tree *BTree) Checkpoint() error {
+	if tree.wal == nil {
+		return nil
+	}
+
+	dpt := tree.bm.GetDirtyPageTable()
+	lsn, err := tree.wal.WriteCheckpoint(dpt)
+	if err != nil {
+		return fmt.Errorf("failed to write checkpoint to WAL: %w", err)
+	}
+
+	// Write the Checkpoint LSN to a .checkpoint file atomically
+	chkPath := filepath.Join(filepath.Dir(tree.bm.pager.file.Name()), "checkpoint.meta")
+	buf := make([]byte, 8)
+	binary.LittleEndian.PutUint64(buf, lsn)
+
+	err = os.WriteFile(chkPath+".tmp", buf, 0644)
+	if err != nil {
+		return err
+	}
+	return os.Rename(chkPath+".tmp", chkPath)
+}
+
+// StartCheckpointRoutine launches a background goroutine that performs fuzzy checkpoints periodically.
+func (tree *BTree) StartCheckpointRoutine(interval time.Duration) {
+	go func() {
+		for {
+			time.Sleep(interval)
+			fmt.Println("[Checkpoint] Starting background checkpoint...")
+			err := tree.Checkpoint()
+			if err != nil {
+				fmt.Printf("[Checkpoint] Error during checkpoint: %v\n", err)
+			} else {
+				fmt.Println("[Checkpoint] Successfully wrote checkpoint.")
+			}
+		}
+	}()
 }
 
 // allocatePage checks the Free Page List on the Meta Page. If a free page is available,
@@ -203,11 +265,15 @@ func (tree *BTree) findLeafPage(key []byte, forWrite bool) (*Page, []uint32, err
 			nextChildID = DeserializeKeyCell(cellData).ChildPageID
 		}
 
-		// For Breadcrumbs 
+		// For Breadcrumbs
 		path = append(path, currPageID)
 
 		// Unpin the current internal node since we are done with it
 		tree.bm.UnpinPage(currPageID, false, false)
+
+		if nextChildID == 0 {
+			return nil, nil, fmt.Errorf("database corrupted: child pointer is 0 (infinite loop prevented)")
+		}
 
 		currPageID = nextChildID
 	}
@@ -277,7 +343,7 @@ func (tree *BTree) upsertCell(key []byte, value []byte, flag uint8) error {
 
 	newCell := NewKVCell(flag, key, value)
 	cellBytes := newCell.Serialize()
-	
+
 	// We start the space calculation with the header size
 	totalSpaceNeeded := HeaderSize
 
@@ -290,7 +356,7 @@ func (tree *BTree) upsertCell(key []byte, value []byte, flag uint8) error {
 		if bytes.Equal(kv.Key, key) {
 			keyExists = true
 			cellToKeep = cellBytes // Swap! (Updates or Tombstones the cell)
-			
+
 			// If we are overwriting a cell that had an overflow chain, we must free the old chain!
 			if kv.IsOverflow() {
 				tree.freeOverflowChain(kv.Value)
@@ -324,6 +390,20 @@ func (tree *BTree) upsertCell(key []byte, value []byte, flag uint8) error {
 		for _, c := range cells {
 			leaf.Insert(c) // Re-insert all cells
 		}
+
+		if tree.wal != nil {
+			op := LogOpInsert
+			if flag == KEY_DELETED_FLAG {
+				op = LogOpDelete
+			}
+			lsn, err := tree.wal.Append(0, leaf.GetPageID(), op, key, value)
+			if err != nil {
+				tree.bm.UnpinPage(leaf.GetPageID(), true, true)
+				return err
+			}
+			leaf.SetLSN(lsn)
+		}
+
 		return tree.bm.UnpinPage(leaf.GetPageID(), true, true)
 	}
 

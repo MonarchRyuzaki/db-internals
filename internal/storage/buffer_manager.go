@@ -5,13 +5,14 @@ import (
 	"sync"
 )
 
-// Frame represents a single slot in memory that holds a cached page.
+// Frame represents a page in the buffer pool.
 type Frame struct {
-	Page          *Page  // Pointer to the actual 4KB page data
-	IsDirty       bool   // True if the page has been modified since being read from disk
-	PinCount      uint32 // Number of active threads using this page
-	ReferenceBits uint16 // Used for page replacement policy
+	Page          *Page        // Pointer to the actual 4KB page data
+	IsDirty       bool         // True if the page has been modified since being read from disk
+	PinCount      uint32       // Number of active threads using this page
+	ReferenceBits uint16       // Used for page replacement policy
 	Latch         sync.RWMutex // Page-level lock
+	RecLSN        uint64       // The LSN of the first log record that dirtied this page
 }
 
 // BufferManager handles the caching of disk pages in memory.
@@ -23,6 +24,8 @@ type BufferManager struct {
 	// When len(pageTable) == maxSize, we must evict an unpinned frame.
 	maxSize int
 
+	wal *WAL // Write-Ahead Log reference
+
 	mu sync.Mutex
 }
 
@@ -31,7 +34,7 @@ const (
 )
 
 // NewBufferManager initializes a new BufferManager with a specific memory limit.
-func NewBufferManager(dir, filename string, maxSize int) (*BufferManager, error) {
+func NewBufferManager(dir, filename string, maxSize int, wal *WAL) (*BufferManager, error) {
 	pager, err := NewPager(dir, filename)
 	if err != nil {
 		return nil, err
@@ -40,6 +43,7 @@ func NewBufferManager(dir, filename string, maxSize int) (*BufferManager, error)
 		pager:     pager,
 		pageTable: make(map[uint32]*Frame),
 		maxSize:   maxSize,
+		wal:       wal,
 	}, nil
 }
 
@@ -60,6 +64,19 @@ func (bm *BufferManager) FetchPageForWrite(pageID uint32, fallbackPageMode uint8
 		return nil, err
 	}
 	frame.Latch.Lock()
+
+	// Full Page Write (Backup for Torn Pages)
+	// We do this immediately when a clean page is fetched for writing.
+	if !frame.IsDirty && bm.wal != nil {
+		lsn, err := bm.wal.Append(0, pageID, LogOpFullPage, nil, frame.Page.GetData())
+		if err != nil {
+			frame.Latch.Unlock()
+			return nil, err
+		}
+		frame.Page.SetLSN(lsn)
+		frame.RecLSN = lsn
+	}
+
 	return frame.Page, nil
 }
 
@@ -146,6 +163,8 @@ func (bm *BufferManager) evict() error {
 		if err := bm.pager.WritePage(victimID, victimFrame.Page); err != nil {
 			return err
 		}
+		victimFrame.IsDirty = false
+		victimFrame.RecLSN = 0
 	}
 
 	delete(bm.pageTable, victimID)
@@ -159,4 +178,43 @@ func (bm *BufferManager) firstFind() (uint32, *Frame, bool) {
 		}
 	}
 	return 0, nil, false
+}
+
+// FlushAll writes all dirty pages to disk.
+func (bm *BufferManager) FlushAll() error {
+	bm.mu.Lock()
+	defer bm.mu.Unlock()
+
+	for id, frame := range bm.pageTable {
+		if frame.IsDirty {
+			if err := bm.pager.WritePage(id, frame.Page); err != nil {
+				return err
+			}
+			frame.IsDirty = false
+			frame.RecLSN = 0
+		}
+	}
+	return nil
+}
+
+// Close flushes all pages and closes the pager.
+func (bm *BufferManager) Close() error {
+	if err := bm.FlushAll(); err != nil {
+		return err
+	}
+	return bm.pager.Close()
+}
+
+// GetDirtyPageTable returns a snapshot of all currently dirty pages and their RecLSN.
+func (bm *BufferManager) GetDirtyPageTable() map[uint32]uint64 {
+	bm.mu.Lock()
+	defer bm.mu.Unlock()
+
+	dpt := make(map[uint32]uint64)
+	for id, frame := range bm.pageTable {
+		if frame.IsDirty {
+			dpt[id] = frame.RecLSN
+		}
+	}
+	return dpt
 }
