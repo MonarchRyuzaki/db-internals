@@ -386,6 +386,13 @@ func (tree *BTree) upsertCell(key []byte, value []byte, flag uint8) error {
 
 	// Because we extracted all cells, we can definitively check if they fit in one page
 	if totalSpaceNeeded <= PageSize {
+		// Sort the cells by key to ensure the page remains strictly sorted!
+		sort.Slice(cells, func(i, j int) bool {
+			ki := DeserializeKVCell(cells[i]).Key
+			kj := DeserializeKVCell(cells[j]).Key
+			return bytes.Compare(ki, kj) < 0
+		})
+
 		leaf.Init(PageTypeLeaf) // Wipe the page clean
 		for _, c := range cells {
 			leaf.Insert(c) // Re-insert all cells
