@@ -30,6 +30,7 @@ type Index interface {
 	Find(key []byte) ([]byte, error)
 	FindLatest(mvccUserKey []byte, txMgr *TransactionManager) ([]byte, error)
 	Delete(key []byte, txMgr *TransactionManager) error
+	Rollback(txid TxnID, txMgr *TransactionManager) error
 }
 
 // BTree implements the Index interface using a B+ Tree over the BufferManager.
@@ -394,6 +395,41 @@ func (tree *BTree) Delete(key []byte, txMgr *TransactionManager) error {
 	return tree.upsertCell(key, nil, KEY_DELETED_FLAG, txMgr)
 }
 
+// Rollback undoes all operations of a transaction by traversing the PrevLSN chain.
+func (tree *BTree) Rollback(txid TxnID, txMgr *TransactionManager) error {
+	txMgr.SetStatus(txid, TXN_ROLLINGBACK)
+
+	lsn := txMgr.GetLastLSN(txid)
+	
+	for lsn != 0 {
+		rec, _, err := tree.wal.ReadRecord(lsn)
+		if err != nil {
+			return err
+		}
+
+		if rec.OpType == LogOpInsert || rec.OpType == LogOpDelete {
+			page, err := tree.bm.FetchPageForWrite(rec.PageID, PageTypeLeaf)
+			if err == nil {
+				inverseOp := LogOpDelete
+				if rec.OpType == LogOpDelete {
+					inverseOp = LogOpInsert
+				}
+				tree.redoUpsertOnPage(page, rec.Key, rec.Value, inverseOp)
+				
+				// Write CLR
+				clrLSN, _ := tree.wal.Append(uint64(txid), rec.PageID, rec.PrevLSN, LogOpCLR, rec.Key, rec.Value)
+				page.SetLSN(clrLSN)
+				tree.bm.UnpinPage(rec.PageID, true, true)
+			}
+		}
+		
+		lsn = rec.PrevLSN
+	}
+
+	txMgr.SetStatus(txid, TXN_ROLLEDBACK)
+	return nil
+}
+
 // upsertCell handles the actual insertion, updating, or tombstoning of a cell.
 func (tree *BTree) upsertCell(key []byte, value []byte, flag uint8, txMgr *TransactionManager) error {
 	leaf, path, err := tree.findLeafPage(key, true)
@@ -435,6 +471,7 @@ func (tree *BTree) upsertCell(key []byte, value []byte, flag uint8, txMgr *Trans
 		if bytes.Equal(kvUserKey, writerUserKey) && txMgr != nil && kvTxID != writerTxID {
 			status := txMgr.GetStatus(kvTxID)
 			
+			// TODO: Handle when status is rolling back or rolled back
 			// If another transaction is currently modifying this key, we abort (WW Conflict)
 			if status == TXN_RUNNING {
 				tree.bm.UnpinPage(leaf.GetPageID(), false, true)

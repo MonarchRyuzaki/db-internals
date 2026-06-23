@@ -66,7 +66,7 @@ func handleConnection(conn net.Conn, mvccDB *engine.DB, txMgr *storage.Transacti
 			if !client.InTx {
 				fmt.Fprintln(conn, "ERR ROLLBACK without BEGIN")
 			} else {
-				txMgr.Rollback(client.TxID)
+				mvccDB.Rollback(client.TxID)
 				client.InTx = false
 				fmt.Fprintln(conn, "OK")
 			}
