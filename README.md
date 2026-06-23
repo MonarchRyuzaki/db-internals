@@ -18,15 +18,28 @@ A lightning-fast, disk-backed Key-Value storage engine built entirely from scrat
 
 ## ⚡ Performance 
 
-The engine was heavily benchmarked on an AMD Ryzen 5 processor. Thanks to the Zero-Copy Slicing and Page-Level Latching optimizations, the engine achieves enterprise-grade speeds:
+The engine was heavily benchmarked on an AMD Ryzen 5 processor. The table below illustrates the raw speeds of the Phase 1 in-memory structure versus the Phase 2 implementation, which includes full MVCC Transaction Isolation and absolute ARIES WAL durability.
 
-| Operation | Throughput | Latency | Allocations |
+| Operation | Phase 1 (No MVCC/WAL) | Phase 2 (Full MVCC & ARIES WAL) | Difference |
 | :--- | :--- | :--- | :--- |
-| **Sequential Writes** | ~59,000 ops/sec | `16,927 ns/op` | `93 allocs/op` |
-| **Random Writes** | ~91,000 ops/sec | `10,963 ns/op` | `92 allocs/op` |
-| **Random Reads (Find)** | **~485,000 ops/sec** | `2,060 ns/op` | `1 alloc/op` |
-| **Parallel Read/Write (50/50)** | **~531,000 ops/sec** | `1,882 ns/op` | `34 allocs/op` |
-| **E-Commerce JSON Workload** | ~255,000 ops/sec | `3,913 ns/op` | `7 allocs/op` |
+| **Reads (Find)** | `2,060 ns/op` (2.0 µs) | `2,112 ns/op` (2.1 µs) | **Identical!** (No read penalty) |
+| **Sequential Writes** | `16,927 ns/op` (0.01 ms)| `2,834,512 ns/op` (2.8 ms)| **~167x Slower** |
+| **Random Writes** | `10,963 ns/op` (0.01 ms)| `2,623,984 ns/op` (2.6 ms)| **~239x Slower** |
+| **Parallel Read/Write**| `1,882 ns/op` (1.8 µs) | `5,038,702 ns/op` (5.0 ms)| **~2600x Slower** |
+| **E-Commerce Workload**| `3,913 ns/op` (3.9 µs) | `1,734,126 ns/op` (1.7 ms)| **~440x Slower** |
+
+### ⚖️ The ACID Tradeoff
+Seeing writes go from microseconds to milliseconds might look like a massive regression at first glance, but **this is exactly what we expect from a real database!** 
+
+In Phase 1, a "write" was basically just throwing bytes into a cached memory page. In Phase 2, every single write must:
+1. **Acquire a Transaction ID** globally from the `TransactionManager`.
+2. **Serialize an ARIES Log Record** representing the physical undo/redo operation.
+3. **Fsync to Disk:** Most importantly, we execute a raw `fsync()` system call to flush the Write-Ahead Log to the physical hard drive platter to guarantee data survives sudden power failures.
+4. **Build MVCC Keys:** Generating multi-versioned timestamps (`[UserKey]\x00[TxID]`) so other transactions can read older versions safely.
+
+We successfully traded raw, dangerous speed for absolute **ACID Durability** (crash-proofing) and **Serializable Isolation** (safe concurrency), precisely replicating the behavior of production databases like PostgreSQL and MySQL.
+
+**The incredible win:** Despite having to navigate complex MVCC timestamps, reconstruct older versions of keys, and interact with the `TransactionManager` visibility map, our reads stayed at **2.1 microseconds**! This proves our Zero-Copy Deserialization and Buffer Pool caching mechanisms are flawlessly holding up under the heavy weight of MVCC!
 
 > 📖 **Read the Case Study:** Check out [res/High Allocs Case Study.md](./res/High%20Allocs%20Case%20Study.md) to see how we dropped read allocations from 237 down to 1 using Go Escape Analysis!
 
