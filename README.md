@@ -1,8 +1,10 @@
-# RyuDB: An ACID-Compliant, MVCC Transactional Database Built From Scratch
+# RyuDB (formerly DB-Internals)
 
-> **Note:** This is an educational project built from scratch while studying the concepts in the book *Database Internals* by Alex Petrov. What started as a simple physical storage exercise evolved into a complete, highly-concurrent, fault-tolerant database architecture mirroring the internals of PostgreSQL and MySQL.
+> **Hello!** 👋 This is an educational project born out of pure curiosity. While reading the excellent book *Database Internals* by Alex Petrov, I wanted to truly understand how the lowest physical layers of a database work under the hood. 
 
-A lightning-fast, strictly serializable, disk-backed transactional database built entirely from scratch in Go. RyuDB implements the brutal, lowest-level physical complexities of modern database engines, focusing on Zero-Copy memory management, lock-free Multi-Version Concurrency Control (MVCC), and absolute data durability via the ARIES Recovery Protocol.
+What started as an attempt to write separate, isolated implementations of different concepts (like a B-Tree, a Buffer Pool, and a WAL) accidentally evolved and wired itself together into a cohesive, fully functional database engine built entirely from scratch in Go. 
+
+To be clear: **I am not competing with production-grade databases like PostgreSQL or MySQL!** This project is purely a personal learning sandbox. However, by strictly adhering to database theory, the engine surprisingly achieves robust ACID compliance, lock-free MVCC isolation, and ARIES Crash Recovery.
 
 ## 🚀 Features
 
