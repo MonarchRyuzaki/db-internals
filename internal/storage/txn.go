@@ -75,6 +75,33 @@ func (t *TransactionManager) Rollback(txid TxnID) {
 	t.txnTable[txid] = TXN_ROLLEDBACK
 }
 
+func (t *TransactionManager) GetMinActiveTxID() TxnID {
+	t.txnMu.Lock()
+	defer t.txnMu.Unlock()
+
+	var minTxID TxnID = ^TxnID(0) // math.MaxUint64 equivalent
+	for txid, status := range t.txnTable {
+		if status == TXN_RUNNING {
+			if txid < minTxID {
+				minTxID = txid
+			}
+		}
+	}
+	return minTxID
+}
+
+func (t *TransactionManager) PruneTables(minActive TxnID) {
+	t.txnMu.Lock()
+	defer t.txnMu.Unlock()
+
+	for txid, status := range t.txnTable {
+		if status != TXN_RUNNING && txid < minActive {
+			delete(t.txnTable, txid)
+			delete(t.lsnTable, txid)
+		}
+	}
+}
+
 // generateTxID generates a monotonically increasing Transaction ID.
 // For now, we use UnixNano to guarantee unique, increasing IDs.
 func GenerateTxID() TxnID {

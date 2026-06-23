@@ -32,6 +32,13 @@ func handleConnection(conn net.Conn, mvccDB *engine.DB, txMgr *storage.Transacti
 	defer conn.Close()
 	client := NewClientState(conn)
 
+	defer func() {
+		if client.InTx {
+			log.Printf("Client disconnected during active transaction %v. Rolling back...", client.TxID)
+			mvccDB.Rollback(client.TxID)
+		}
+	}()
+
 	scanner := bufio.NewScanner(conn)
 
 	fmt.Fprintln(conn, "Welcome to the DB server.")
@@ -167,10 +174,10 @@ func main() {
 	// Start the background checkpoint process
 	db.StartCheckpointRoutine(30 * time.Second)
 
-	db.StartVacuumRoutine(10 * time.Second)
+	txMgr := storage.NewTransactionManager()
+	db.StartVacuumRoutine(10 * time.Second, txMgr)
 	
 	// Wrap the BTree in our MVCC Engine
-	txMgr := storage.NewTransactionManager()
 	mvccDB := engine.NewDB(db, txMgr)
 
 	port := "8080"

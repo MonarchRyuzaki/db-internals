@@ -10,12 +10,12 @@ import (
 // TODO: Since we are doing MVCC, we must delete all older versions of a node when a newer version has a DELETED FLAG
 
 // StartVacuumRoutine launches a background goroutine that runs the vacuum process periodically.
-func (tree *BTree) StartVacuumRoutine(interval time.Duration) {
+func (tree *BTree) StartVacuumRoutine(interval time.Duration, txMgr *TransactionManager) {
 	go func() {
 		for {
 			time.Sleep(interval)
 			fmt.Println("[Vacuum] Starting background cleanup...")
-			err := tree.Vacuum()
+			err := tree.Vacuum(txMgr)
 			if err != nil {
 				fmt.Printf("[Vacuum] Error during cleanup: %v\n", err)
 			} else {
@@ -26,12 +26,18 @@ func (tree *BTree) StartVacuumRoutine(interval time.Duration) {
 }
 
 // Vacuum triggers a full database sweep to drop tombstones and free associated overflow pages.
-func (tree *BTree) Vacuum() error {
+func (tree *BTree) Vacuum(txMgr *TransactionManager) error {
+	minActive := txMgr.GetMinActiveTxID()
+	
 	// We perform a DFS starting to visit every single leaf node.
-	return tree.vacuumNode(tree.rootPageID)
+	err := tree.vacuumNode(tree.rootPageID, minActive)
+	
+	// Once physical data is purged, we can safely prune the in-memory maps
+	txMgr.PruneTables(minActive)
+	return err
 }
 
-func (tree *BTree) vacuumNode(pageID uint32) error {
+func (tree *BTree) vacuumNode(pageID uint32, minActive TxnID) error {
 	// Fetch for READ first since we don't know if it's a leaf yet
 	page, err := tree.bm.FetchPageForRead(pageID, PageTypeInternal)
 	if err != nil {
@@ -41,7 +47,7 @@ func (tree *BTree) vacuumNode(pageID uint32) error {
 	// Leaf Node! Drop the read latch and fetch it for WRITE so we can clean it.
 	if page.GetPageType() == PageTypeLeaf {
 		tree.bm.UnpinPage(pageID, false, false)
-		return tree.vacuumLeaf(pageID)
+		return tree.vacuumLeaf(pageID, minActive)
 	}
 
 	// Internal node. Collect all child pointers.
@@ -57,14 +63,14 @@ func (tree *BTree) vacuumNode(pageID uint32) error {
 
 	for _, childID := range children {
 		if childID != 0 {
-			tree.vacuumNode(childID)
+			tree.vacuumNode(childID, minActive)
 		}
 	}
 
 	return nil
 }
 
-func (tree *BTree) vacuumLeaf(pageID uint32) error {
+func (tree *BTree) vacuumLeaf(pageID uint32, minActive TxnID) error {
 	leaf, err := tree.bm.FetchPageForWrite(pageID, PageTypeLeaf)
 	if err != nil {
 		return err
@@ -74,23 +80,24 @@ func (tree *BTree) vacuumLeaf(pageID uint32) error {
 	var cellsToKeep [][]byte
 	cleanedCount := 0
 
-	// We need to find the latest version of each userKey.
-	// Since keys are strictly sorted by [UserKey]\x00[TxID], all versions of a
-	// userKey are contiguous, and the latest version is the last one in the sequence.
 	for i := uint16(0); i < slotCount; i++ {
 		c, _ := leaf.Get(i)
 		kv := DeserializeKVCell(c)
-		userKey, _ := ExtractMVCCKey(kv.Key)
+		userKey, txID := ExtractMVCCKey(kv.Key)
 
 		isOldVersion := false
 		if i < slotCount-1 {
 			nextC, _ := leaf.Get(i + 1)
 			nextKV := DeserializeKVCell(nextC)
 			
-			nextUserKey, _ := ExtractMVCCKey(nextKV.Key)
+			nextUserKey, nextTxID := ExtractMVCCKey(nextKV.Key)
 			
 			if bytes.Equal(userKey, nextUserKey) {
-				isOldVersion = true
+				// We can only delete this version if the overriding version
+				// is older than all currently active transactions.
+				if nextTxID < minActive {
+					isOldVersion = true
+				}
 			}
 		}
 
@@ -102,8 +109,9 @@ func (tree *BTree) vacuumLeaf(pageID uint32) error {
 			continue
 		}
 
-		// This is the latest version of this userKey
-		if kv.IsDeleted() {
+		// This is the latest version of this userKey, OR the only version left
+		// We can only delete a Tombstone if it's older than all active transactions.
+		if kv.IsDeleted() && txID < minActive {
 			cleanedCount++
 			if kv.IsOverflow() {
 				tree.freeOverflowChain(kv.Value)

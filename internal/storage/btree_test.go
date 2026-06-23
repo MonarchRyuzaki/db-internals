@@ -226,7 +226,7 @@ func TestBTree_FreePageReuse(t *testing.T) {
 	tree.Delete([]byte("key1"), txMgr)
 
 	// 4. Run the Vacuum process to sweep the tombstone and free the 3 overflow pages
-	err = tree.Vacuum()
+	err = tree.Vacuum(txMgr)
 	if err != nil {
 		t.Fatalf("Vacuum failed: %v", err)
 	}

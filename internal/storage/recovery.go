@@ -187,7 +187,7 @@ func (tree *BTree) Recover() error {
 		if rec.OpType == LogOpInsert || rec.OpType == LogOpDelete {
 			page, err := tree.bm.FetchPageForWrite(rec.PageID, PageTypeLeaf)
 			if err == nil {
-				inverseOp := LogOpDelete
+				inverseOp := LogOpUndoInsert
 				if rec.OpType == LogOpDelete {
 					inverseOp = LogOpInsert
 				}
@@ -233,18 +233,19 @@ func (tree *BTree) redoUpsertOnPage(page *Page, key, value []byte, opType uint8)
 		c, _ := page.Get(i)
 		kv := DeserializeKVCell(c)
 
-		var cellToKeep []byte
 		if bytes.Equal(kv.Key, key) {
 			keyExists = true
-			cellToKeep = cellBytes
+			if opType != LogOpUndoInsert {
+				cells = append(cells, cellBytes)
+			}
 		} else {
-			cellToKeep = make([]byte, len(c))
+			cellToKeep := make([]byte, len(c))
 			copy(cellToKeep, c)
+			cells = append(cells, cellToKeep)
 		}
-		cells = append(cells, cellToKeep)
 	}
 
-	if !keyExists {
+	if !keyExists && opType != LogOpUndoInsert {
 		cells = append(cells, cellBytes)
 	}
 

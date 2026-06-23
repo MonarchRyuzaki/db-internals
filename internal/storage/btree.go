@@ -411,7 +411,7 @@ func (tree *BTree) Rollback(txid TxnID, txMgr *TransactionManager) error {
 		if rec.OpType == LogOpInsert || rec.OpType == LogOpDelete {
 			page, err := tree.bm.FetchPageForWrite(rec.PageID, PageTypeLeaf)
 			if err == nil {
-				inverseOp := LogOpDelete
+				inverseOp := LogOpUndoInsert
 				if rec.OpType == LogOpDelete {
 					inverseOp = LogOpInsert
 				}

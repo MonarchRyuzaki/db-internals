@@ -10,21 +10,22 @@ import (
 
 // Log Operation Types
 const (
-	LogOpInsert   uint8 = 1
-	LogOpDelete   uint8 = 2
-	LogOpFullPage uint8 = 3 // Full Page Write (Backup for torn pages)
-	LogOpCommit   uint8 = 4
-	LogOpAbort    uint8 = 5
-	LogOpCLR      uint8 = 6 // Compensation Log Record (Repeating History during Undo)
+	LogOpInsert     uint8 = 1
+	LogOpDelete     uint8 = 2
+	LogOpFullPage   uint8 = 3 // Full Page Write (Backup for torn pages)
+	LogOpCommit     uint8 = 4
+	LogOpAbort      uint8 = 5
+	LogOpCLR        uint8 = 6 // Compensation Log Record (Repeating History during Undo)
 	LogOpCheckpoint uint8 = 7 // Fuzzy Checkpoint
+	LogOpUndoInsert uint8 = 8 // Physical erasure of a cell during an Undo phase
 )
 
 // LogRecord represents a single physiological operation in the WAL.
 type LogRecord struct {
-	LSN    uint64 // Log Sequence Number (monotonically increasing)
-	TxnID  uint64 // Transaction ID
-	PrevLSN uint64 
-	// To perform the Undo phase, each log record must store the LSN of the 
+	LSN     uint64 // Log Sequence Number (monotonically increasing)
+	TxnID   uint64 // Transaction ID
+	PrevLSN uint64
+	// To perform the Undo phase, each log record must store the LSN of the
 	// *previous* log record written by the same transaction to allow backward scanning.
 	PageID uint32 // Physical Page ID
 	OpType uint8  // Logical Operation
@@ -115,7 +116,7 @@ func NewWAL(path string) (*WAL, error) {
 
 	stat, _ := file.Stat()
 	size := stat.Size()
-	
+
 	if size == 0 {
 		// Write a 4-byte magic header so LSN 0 is never used for a valid record.
 		// This prevents collisions with uninitialized pages which have LSN 0.
@@ -204,7 +205,7 @@ func (w *WAL) Close() error {
 // It serializes the Dirty Page Table into the Value payload.
 func (w *WAL) WriteCheckpoint(dpt map[uint32]uint64) (uint64, error) {
 	// Serialize DPT: 4 bytes len + 12 bytes per entry
-	buf := make([]byte, 4 + len(dpt)*12)
+	buf := make([]byte, 4+len(dpt)*12)
 	binary.LittleEndian.PutUint32(buf[0:4], uint32(len(dpt)))
 	offset := 4
 	for pageID, recLSN := range dpt {
@@ -212,7 +213,7 @@ func (w *WAL) WriteCheckpoint(dpt map[uint32]uint64) (uint64, error) {
 		binary.LittleEndian.PutUint64(buf[offset+4:offset+12], recLSN)
 		offset += 12
 	}
-	
+
 	// Append the checkpoint record (TxnID=0, PageID=0)
 	lsn, err := w.Append(0, 0, 0, LogOpCheckpoint, nil, buf)
 	if err != nil {
