@@ -1,4 +1,4 @@
-# RyuDB (formerly DB-Internals)
+# RyuDB : An ACID-Compliant, MVCC Transactional Database
 
 > **Hello!** 👋 This is an educational project born out of pure curiosity. While reading the excellent book *Database Internals* by Alex Petrov, I wanted to truly understand how the lowest physical layers of a database work under the hood. 
 
