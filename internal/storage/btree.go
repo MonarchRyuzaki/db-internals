@@ -28,7 +28,7 @@ import (
 type Index interface {
 	Insert(key []byte, value []byte) error
 	Find(key []byte) ([]byte, error)
-	FindLatest(mvccUserKey []byte) ([]byte, error)
+	FindLatest(mvccUserKey []byte, txMgr *TransactionManager) ([]byte, error)
 	Delete(key []byte) error
 }
 
@@ -287,11 +287,38 @@ func (tree *BTree) findLeafPage(key []byte, forWrite bool) (*Page, []uint32, err
 	}
 }
 
-// FindLatest searches for the most recent version of a key that is <= maxTxID.
-// This is used exclusively for MVCC reads.
-func (tree *BTree) FindLatest(mvccUserKey []byte) ([]byte, error) {
-	userKey := mvccUserKey[:len(mvccUserKey)-9]
+// isVersionVisible checks if a specific MVCC version cell is visible to the reader.
+func isVersionVisible(kvKey []byte, mvccUserKey []byte, txMgr *TransactionManager) bool {
+	userKey, readerTxID := ExtractMVCCKey(mvccUserKey)
+	kvKey, versionTxID := ExtractMVCCKey(kvKey)
 
+	// Is it the exact same user key?
+	if !bytes.Equal(kvKey, userKey) {
+		return false
+	}
+
+	// Is the version older than or equal to our reader TxID?
+	if versionTxID > readerTxID {
+		return false // It's from the future
+	}
+
+	// Is the version committed, or does it belong to us?
+	if versionTxID == readerTxID {
+		return true // We can always see our own writes
+	}
+
+	if txMgr != nil {
+		status := txMgr.GetStatus(versionTxID)
+		if status != TXN_COMMITED {
+			return false // It's from another active/aborted transaction
+		}
+	}
+
+	return true
+}
+
+// FindLatest searches for the most recent version of a key that is visible to the reader.
+func (tree *BTree) FindLatest(mvccUserKey []byte, txMgr *TransactionManager) ([]byte, error) {
 	leaf, _, err := tree.findLeafPage(mvccUserKey, false)
 	if err != nil {
 		return nil, err
@@ -301,18 +328,13 @@ func (tree *BTree) FindLatest(mvccUserKey []byte) ([]byte, error) {
 	slotCount := leaf.getSlotCount()
 	var bestKV *KVCell
 
-	// Scan to find the largest matching key that is <= our searchKey
 	for i := uint16(0); i < slotCount; i++ {
 		c, _ := leaf.Get(i)
 		kv := DeserializeKVCell(c)
 
-		// Check if it exactly matches the userKey prefix
-		if len(kv.Key) > len(userKey) && bytes.Equal(kv.Key[:len(userKey)], userKey) && kv.Key[len(userKey)] == 0x00 {
-			// Check if the TxID is <= our maxTxID
-			if bytes.Compare(kv.Key, mvccUserKey) <= 0 {
-				if bestKV == nil || bytes.Compare(kv.Key, bestKV.Key) > 0 {
-					bestKV = kv
-				}
+		if isVersionVisible(kv.Key, mvccUserKey, txMgr) {
+			if bestKV == nil || bytes.Compare(kv.Key, bestKV.Key) > 0 {
+				bestKV = kv
 			}
 		}
 	}
