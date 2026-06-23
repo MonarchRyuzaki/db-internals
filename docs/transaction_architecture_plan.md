@@ -1,58 +1,64 @@
 # Transaction Architecture & Concurrency Control Plan
 
 ## Overview
-This document outlines the planned architecture for implementing Transactions, Multi-Version Concurrency Control (MVCC), and Optimistic Locking in the database. 
+This document outlines the planned architecture for implementing Transactions and Multi-Version Concurrency Control (MVCC) with an **Immediate Apply + Undo Log** approach. 
 
-The chosen design heavily mimics **Redis's `MULTI`/`EXEC` transaction model**, utilizing a **Batch Execution Model** combined with **Optimistic Concurrency Control (OCC)** and **Automatic Retries**.
+This design aligns closely with traditional relational databases (like PostgreSQL and InnoDB) and flawlessly complements our existing ARIES Recovery architecture.
 
 ---
 
-## 1. The Batch Execution Model
-Instead of executing commands interactively one by one, the database will queue commands submitted by the client during an active transaction. 
+## 1. Immediate Execution Model
+Instead of buffering commands and applying them in a batch, commands will execute against the B-Tree in real-time.
 
 ### Flow:
-1. **`BEGIN`**: The client initiates a transaction. A new transaction context is created in memory, equipped with a command buffer.
-2. **Buffering**: As the client sends commands (e.g., `SET X 10`, `GET Y`), they are parsed and stored purely in the transaction's local buffer. **No execution against the B-Tree happens yet.**
-3. **`COMMIT`**: The execution phase begins. The database takes the entire buffer of commands, acquires a transaction timestamp (`TxID`), and begins applying the operations one by one against the B-Tree.
+1. **`BEGIN`**: The client initiates a transaction. The Database generates a unique `TxID` (timestamp or sequence) and adds it to the **Global Transaction Table** with a state of `Running`.
+2. **Immediate Application**: As the client sends commands (e.g., `SET X 10`, `DELETE Y`), they are immediately executed in the B-Tree. New MVCC records are inserted with the current `TxID`. The WAL logs these changes immediately, including a `PrevLSN` pointer to the transaction's previous log record.
+3. **`COMMIT`**: The engine writes a `COMMIT` record to the WAL, and updates the Global Transaction Table to mark the `TxID` as `Committed`.
+4. **`ROLLBACK`**: The engine triggers the Undo Phase, scanning backward through the WAL via `PrevLSN` pointers to generate Compensation Log Records (CLRs) and revert the B-Tree state.
 
-### Drawback: Lack of Interactive Transactions
-Because `GET` commands are merely buffered and not actually executed until `COMMIT`, the client application cannot make decisions mid-transaction based on database state. 
-* **Impossible Workflow:** Client runs `GET balance` -> Wait for DB reply -> Client calculates `balance - 50` -> Client runs `SET balance`.
-* **Solution:** Clients must submit completely self-contained logic, or rely on optimistic locking checks (like Redis `WATCH`), knowing that the sequence of commands executes blindly as a batch at the very end.
+### Advantage over Buffering:
+Clients can read their own writes. A client can `SET balance 100`, and immediately run `GET balance` to retrieve `100`, making interactive transactions possible.
 
 ---
 
 ## 2. Global Transaction Table
-Because multiple batches will be executing concurrently across different threads upon reaching the `COMMIT` phase, the B-Tree will contain uncommitted data.
-
-To protect readers from dirty reads, we will implement a **Global Transaction Table**.
+To protect readers from dirty reads of uncommitted data, we implement a **Global Transaction Table**.
 
 ### States:
-* **`Running`**: The transaction is actively applying its buffered operations to the B-Tree.
-* **`Committed`**: All operations finished successfully and validation passed.
-* **`Rollback`**: The transaction encountered a conflict or error and its operations are invalid.
+* **`Running`**: The transaction is active. Its writes are in the B-Tree but invisible to other transactions.
+* **`Committed`**: The transaction is finalized. Its writes are permanently visible.
+* **`Rollback`**: The transaction was aborted. Its writes are logically invalid (and will be physically undone).
 
-### `FindLatest` Visibility Rules:
+### `FindLatest` Visibility Rules (MVCC):
 When `FindLatest(search_key, reader_txid)` scans the B-Tree for the newest version of a key:
-1. It must check the `TxID` of the found version against the Transaction Table.
-2. It **only** returns versions whose `TxID` is explicitly marked as `Committed`.
-3. If a version belongs to a `Running` or `Rollback` transaction, it ignores it and continues scanning for an older, committed version.
+1. It reads the `TxID` of the found version.
+2. If `TxID == reader_txid`, the version is visible (transactions can read their own writes).
+3. If the version's `TxID` is marked as `Committed` in the Global Transaction Table, it is visible.
+4. If the version's `TxID` is `Running` or `Rollback` (and not the reader's), it is ignored, and the scan continues to an older, committed version.
 
 ---
 
-## 3. Optimistic Concurrency Control (OCC) & Automatic Retries
-To achieve strict isolation (handling Write-Write conflicts and Write Skew) without heavy locking, the execution phase will use optimistic locking.
+## 3. Conflict Resolution
+Because we apply changes immediately, two active transactions might try to modify the same key.
 
-### Validation Phase:
-As the buffered commands are executed, the engine tracks what keys were read and written. 
-* **Conflict Detection:** If the transaction attempts to write a key, but discovers that a *younger* (more recently committed) transaction has already modified that key, a conflict is triggered.
-* **Write Skew Detection:** Before marking as `Committed`, verify that none of the keys *read* during execution have been modified by another committed transaction.
+### Write-Write Conflicts:
+If a transaction attempts to write a key, but discovers that another `Running` transaction has already written an uncommitted version of that key:
+* **Fail-Fast**: To avoid complex deadlock detection, the younger transaction can immediately abort, triggering a `ROLLBACK`, and returning a conflict error to the client. Alternatively, we can use a wait-die scheme.
 
-### Automatic Retry Mechanism:
-Unlike traditional databases that throw an error and force the client application to retry from scratch, this batch architecture gives us a superpower: **We have the entire sequence of the client's commands in memory.**
+---
 
-If a conflict is detected:
-1. The transaction state is marked as `Rollback`.
-2. A brand new `TxID` (timestamp) is generated.
-3. The execution engine automatically re-runs the entire command buffer against the new state of the database.
-4. The client application never knows a conflict occurred; it simply receives a successful `COMMIT` response once a retry succeeds.
+## 4. ARIES Undo Logging & Rollback
+This is the final missing piece of our ARIES protocol.
+
+### Structure:
+Every WAL record for a data modification must include a `PrevLSN` field. The Active Transaction Table tracks the `LastLSN` for every `Running` transaction.
+
+### Rollback Process:
+1. Fetch the `LastLSN` from the Transaction Table.
+2. Read the WAL record at `LastLSN`.
+3. Apply the inverse operation to the B-Tree (e.g., if it was an `Insert`, we execute a `Delete` of that exact version).
+4. Write a **Compensation Log Record (CLR)** to the WAL (to ensure rollbacks are durable).
+5. Follow the `PrevLSN` pointer backward and repeat until `PrevLSN == 0`.
+6. Mark the transaction as `Rollback` in the Transaction Table.
+
+This Undo process is used both for interactive client `ROLLBACK` commands and during system startup if the database crashed while transactions were `Running`.
